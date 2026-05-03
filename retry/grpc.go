@@ -21,7 +21,7 @@ import (
 	"errors"
 	"time"
 
-	cbackoff "github.com/H-BF/corlib/pkg/backoff"
+	cbackoff "github.com/PRO-Robotech/kacho-corelib/backoff"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
