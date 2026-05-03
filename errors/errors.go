@@ -1,0 +1,69 @@
+package errors
+
+import (
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// Builder — строитель gRPC-статуса с деталями.
+type Builder struct {
+	st         *status.Status
+	violations []*errdetails.BadRequest_FieldViolation
+}
+
+func newBuilder(c codes.Code, msg string) *Builder {
+	return &Builder{st: status.New(c, msg)}
+}
+
+// AddFieldViolation добавляет нарушение поля к BadRequest details.
+func (b *Builder) AddFieldViolation(field, desc string) *Builder {
+	b.violations = append(b.violations, &errdetails.BadRequest_FieldViolation{Field: field, Description: desc})
+	return b
+}
+
+// Err собирает итоговую ошибку с деталями.
+func (b *Builder) Err() error {
+	if len(b.violations) > 0 {
+		st, _ := b.st.WithDetails(&errdetails.BadRequest{FieldViolations: b.violations})
+		return st.Err()
+	}
+	return b.st.Err()
+}
+
+// Конструкторы per §14
+
+// NotFound создаёт ошибку 404 с ResourceInfo detail.
+func NotFound(kind, id string) *Builder {
+	b := newBuilder(codes.NotFound, kind+" "+id+" not found")
+	if st2, err := b.st.WithDetails(&errdetails.ResourceInfo{
+		ResourceType: kind, ResourceName: id,
+	}); err == nil {
+		b.st = st2
+	}
+	return b
+}
+
+// InvalidArgument создаёт ошибку 400, к которой можно добавить FieldViolation.
+func InvalidArgument() *Builder { return newBuilder(codes.InvalidArgument, "invalid argument") }
+
+// AlreadyExists создаёт ошибку 409.
+func AlreadyExists(k, id string) *Builder {
+	return newBuilder(codes.AlreadyExists, k+" "+id+" already exists")
+}
+
+// FailedPrecondition создаёт ошибку 400 (предусловие не выполнено).
+func FailedPrecondition(msg string) *Builder { return newBuilder(codes.FailedPrecondition, msg) }
+
+// Aborted создаёт ошибку 409 (операция прервана, требует повтора).
+func Aborted(msg string) *Builder { return newBuilder(codes.Aborted, msg) }
+
+// Unavailable создаёт ошибку 503.
+func Unavailable(msg string) *Builder { return newBuilder(codes.Unavailable, msg) }
+
+// Internal создаёт ошибку 500.
+func Internal(msg string) *Builder { return newBuilder(codes.Internal, msg) }
+
+// Gone создаёт ошибку HTTP 410 (GONE).
+// gRPC не имеет стандартного кода GONE; используем codes.Code(410) per §14.
+func Gone(msg string) *Builder { return newBuilder(codes.Code(410), msg) }
