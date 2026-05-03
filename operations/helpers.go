@@ -10,9 +10,13 @@ import (
 )
 
 // New создаёт Operation с UUID, текущим временем, done=false.
+// domainPrefix используется для маршрутизации в api-gateway OpsProxy:
+// например "rm" / "vpc" / "compute" — финальный ID = "<prefix>_<uuid>".
+// Если prefix пуст — ID без prefix (legacy/internal use).
+//
 // metadata — proto-сообщение специфичное для типа RPC
 // (например, CreateInstanceMetadata{instance_id: uid}).
-func New(description string, metadata proto.Message) (Operation, error) {
+func New(domainPrefix, description string, metadata proto.Message) (Operation, error) {
 	var anyMeta *anypb.Any
 	if metadata != nil {
 		var err error
@@ -22,9 +26,14 @@ func New(description string, metadata proto.Message) (Operation, error) {
 		}
 	}
 
+	id := ids.NewUID()
+	if domainPrefix != "" {
+		id = domainPrefix + "_" + id
+	}
+
 	now := time.Now().UTC()
 	return Operation{
-		ID:          ids.NewUID(),
+		ID:          id,
 		Description: description,
 		CreatedAt:   now,
 		CreatedBy:   "anonymous",

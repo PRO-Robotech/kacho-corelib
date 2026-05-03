@@ -11,27 +11,25 @@ import (
 // При успехе → repo.MarkDone(response).
 // При ошибке → repo.MarkError(status.Convert(err)).
 //
-// Пример использования в service.CreateInstance:
+// КРИТИЧНО: input ctx — это request-context handler-а, который cancel-ится
+// сразу после возврата handler-ом ответа клиенту. Использовать его в worker-е
+// нельзя — все cross-service gRPC-вызовы внутри fn упадут с "context canceled".
+// Поэтому worker запускается с **detached** context.Background(), не наследуя
+// deadline / cancel из request.
 //
-//	op, _ := operations.New("Create instance "+name, &CreateInstanceMetadata{InstanceId: uid})
-//	_ = repo.Create(ctx, op)
-//	operations.Run(ctx, repo, op.ID, func(ctx context.Context) (*anypb.Any, error) {
-//	    inst := buildInstance(...)
-//	    return anypb.New(inst)
-//	})
-//	return op
-//
-// ctx передаётся в fn — позволяет передать deadline / trace span.
-// ctx НЕ отменяет goroutine при отмене; fn сам обязан проверять ctx.Done().
+// Если в будущем потребуется trace-propagation — извлекать конкретные values
+// (e.g. request-id) из request-ctx и переносить в bg-ctx через context.WithValue.
 func Run(ctx context.Context, repo Repo, opID string, fn func(context.Context) (*anypb.Any, error)) {
+	_ = ctx // intentionally unused — см. примечание выше
 	go func() {
-		resp, err := fn(ctx)
+		bgCtx := context.Background()
+		resp, err := fn(bgCtx)
 		if err != nil {
 			// Конвертируем любую ошибку в google.rpc.Status.
 			st := status.Convert(err)
-			_ = repo.MarkError(ctx, opID, st.Proto())
+			_ = repo.MarkError(bgCtx, opID, st.Proto())
 			return
 		}
-		_ = repo.MarkDone(ctx, opID, resp)
+		_ = repo.MarkDone(bgCtx, opID, resp)
 	}()
 }

@@ -1,7 +1,7 @@
 -- +goose Up
 
 CREATE TABLE operations (
-  id            UUID         PRIMARY KEY,
+  id            TEXT         PRIMARY KEY,  -- "<domain>_<uuid>" для api-gateway routing
   description   TEXT         NOT NULL,
   created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
   created_by    TEXT         NOT NULL DEFAULT 'anonymous',
