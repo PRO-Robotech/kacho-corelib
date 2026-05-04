@@ -48,3 +48,41 @@ func TestPageSize(t *testing.T) {
 		})
 	}
 }
+
+func TestZoneId(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{name: "ok-a", input: "ru-central1-a", wantErr: false},
+		{name: "ok-b", input: "ru-central1-b", wantErr: false},
+		{name: "ok-c", input: "ru-central1-c", wantErr: false},
+		{name: "ok-d", input: "ru-central1-d", wantErr: false},
+		{name: "empty", input: "", wantErr: true},
+		{name: "out-of-list-z", input: "ru-central1-z", wantErr: true},
+		{name: "wrong-region", input: "ru-central2-a", wantErr: true},
+		{name: "garbage", input: "invalid-zone", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ZoneId("zone_id", tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got nil", tc.input)
+				}
+				st, ok := status.FromError(err)
+				if !ok {
+					t.Fatalf("expected gRPC status, got: %v", err)
+				}
+				if st.Code() != codes.InvalidArgument {
+					t.Fatalf("expected InvalidArgument, got %v", st.Code())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tc.input, err)
+			}
+		})
+	}
+}

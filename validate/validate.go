@@ -31,6 +31,17 @@ var nameRe = regexp.MustCompile(`^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`)
 // labelKeyRe — YC label key regex (строчные + цифры + `-_./\`).
 var labelKeyRe = regexp.MustCompile(`^[a-z][-_./\\a-z0-9]{0,62}$`)
 
+// allowedZones — verbatim whitelist зон для Kachō (ровно YC verbatim).
+//
+// Любой `zoneId` вне этого списка — InvalidArgument; пустой `zoneId` —
+// InvalidArgument с сообщением `zone_id is required`.
+var allowedZones = map[string]struct{}{
+	"ru-central1-a": {},
+	"ru-central1-b": {},
+	"ru-central1-c": {},
+	"ru-central1-d": {},
+}
+
 const (
 	// MaxNameLen — максимум для Name полей ресурсов (verbatim YC).
 	MaxNameLen = 63
@@ -116,6 +127,26 @@ func PageSize(field string, value int64) (int64, error) {
 		return DefaultPageSize, nil
 	}
 	return value, nil
+}
+
+// ZoneId проверяет, что value — валидное имя зоны Kachō.
+//
+// Контракт verbatim YC: `ru-central1-{a,b,c,d}`. Пустая строка — отдельная
+// проверка `zone_id is required` (FieldViolation), значение вне whitelist —
+// `zone_id must be one of: ru-central1-a/b/c/d` (FieldViolation). Возвращает
+// InvalidArgument с FieldViolation либо nil.
+func ZoneId(field, value string) error {
+	if value == "" {
+		return coreerrors.InvalidArgument().
+			AddFieldViolation(field, field+" is required").
+			Err()
+	}
+	if _, ok := allowedZones[value]; !ok {
+		return coreerrors.InvalidArgument().
+			AddFieldViolation(field, field+" must be one of: ru-central1-a, ru-central1-b, ru-central1-c, ru-central1-d").
+			Err()
+	}
+	return nil
 }
 
 // UpdateMask проверяет, что все field-ы в mask содержатся в known.
