@@ -42,6 +42,10 @@ const (
 	MaxLabelKeyLen = 63
 	// MaxLabelValueLen — длина значения label.
 	MaxLabelValueLen = 63
+	// MaxPageSize — верхняя граница для page_size в List RPC (verbatim YC).
+	MaxPageSize int64 = 1000
+	// DefaultPageSize — значение по-умолчанию, когда клиент не задал page_size.
+	DefaultPageSize int64 = 50
 )
 
 // Name проверяет, что value соответствует verbatim YC name-контракту.
@@ -88,6 +92,30 @@ func Labels(field string, labels map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// PageSize проверяет границы page_size в List RPC.
+//
+// Семантика — verbatim YC contract:
+//   - page_size == 0 → допустимо; клиент явно не задал, репозиторий применяет
+//     DefaultPageSize. Возвращает (DefaultPageSize, nil).
+//   - page_size < 0 или > MaxPageSize → InvalidArgument с FieldViolation;
+//     возвращает (0, err). Не silent fallback — это нарушение контракта.
+//   - 1..MaxPageSize → возвращает (value, nil).
+//
+// Возвращаемое effective значение нужно использовать в LIMIT-выражении SQL.
+// Каждый репозиторий-метод List должен вызывать PageSize первой строкой
+// и пробрасывать err наружу через service.
+func PageSize(field string, value int64) (int64, error) {
+	if value < 0 || value > MaxPageSize {
+		return 0, coreerrors.InvalidArgument().
+			AddFieldViolation(field, field+" must be in [0..1000] (0 means default)").
+			Err()
+	}
+	if value == 0 {
+		return DefaultPageSize, nil
+	}
+	return value, nil
 }
 
 // UpdateMask проверяет, что все field-ы в mask содержатся в known.
