@@ -16,6 +16,7 @@
 package validate
 
 import (
+	"net"
 	"regexp"
 	"unicode/utf8"
 
@@ -176,6 +177,81 @@ func ZoneId(field, value string) error {
 	if _, ok := allowedZones[value]; !ok {
 		return coreerrors.InvalidArgument().
 			AddFieldViolation(field, field+" must be one of: ru-central1-a, ru-central1-b, ru-central1-c, ru-central1-d").
+			Err()
+	}
+	return nil
+}
+
+// dhcpDomainNameRe — RFC 1034/1123-совместимое DNS-имя.
+//
+// Контракт verbatim YC (probe 2026-05-04): YC отказывает на `!!!` с текстом
+// "Illegal argument Invalid domain name '<value>'" (sync 400 code:3). Длина
+// каждой метки 1..63, общая длина <= 253 (без trailing dot).
+var dhcpDomainNameRe = regexp.MustCompile(`^([a-zA-Z0-9]([-a-zA-Z0-9]{0,61}[a-zA-Z0-9])?)(\.([a-zA-Z0-9]([-a-zA-Z0-9]{0,61}[a-zA-Z0-9])?))*$`)
+
+// IPAddress проверяет, что value — синтаксически валидный IPv4 или IPv6
+// адрес (без CIDR). Используется для DhcpOptions.{domain_name_servers,
+// ntp_servers} и подобных IP-полей.
+//
+// Контракт verbatim YC (probe 2026-05-04): YC отвергает "not-an-ip" /
+// "pool.ntp.org" с текстом "Illegal argument Cannot parse address: <value>".
+//
+// Возвращает InvalidArgument с FieldViolation либо nil.
+func IPAddress(field, value string) error {
+	if net.ParseIP(value) == nil {
+		return coreerrors.InvalidArgument().
+			AddFieldViolation(field, "Cannot parse address: "+value).
+			Err()
+	}
+	return nil
+}
+
+// DhcpDomainName проверяет, что value — валидное DNS-имя (RFC 1123).
+//
+// Пустая строка — OK (поле опциональное). Длина общая <= 253, regex выше.
+//
+// Verbatim YC text: "Invalid domain name '<value>'".
+func DhcpDomainName(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	if utf8.RuneCountInString(value) > 253 || !dhcpDomainNameRe.MatchString(value) {
+		return coreerrors.InvalidArgument().
+			AddFieldViolation(field, "Invalid domain name '"+value+"'").
+			Err()
+	}
+	return nil
+}
+
+// allowedDdosProviders — verbatim YC whitelist (probe 2026-05-04).
+//
+// YC отвергает unknown provider с "Illegal argument Invalid DDoS protection
+// provider." Пустая строка — OK (опциональное поле).
+var allowedDdosProviders = map[string]struct{}{
+	"":       {},
+	"qrator": {},
+	"advanced": {},
+}
+
+// DdosProvider проверяет ddos_protection_provider — whitelist.
+func DdosProvider(field, value string) error {
+	if _, ok := allowedDdosProviders[value]; !ok {
+		return coreerrors.InvalidArgument().
+			AddFieldViolation(field, "Invalid DDoS protection provider.").
+			Err()
+	}
+	return nil
+}
+
+// SmtpCapability проверяет outgoing_smtp_capability.
+//
+// Contract verbatim YC (probe 2026-05-04): YC отказывает на любое непустое
+// значение с "Illegal argument Invalid SMTP capability." (обычным tenant'ам
+// нельзя её включить). Empty string — OK.
+func SmtpCapability(field, value string) error {
+	if value != "" {
+		return coreerrors.InvalidArgument().
+			AddFieldViolation(field, "Invalid SMTP capability.").
 			Err()
 	}
 	return nil
