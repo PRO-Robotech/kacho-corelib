@@ -9,10 +9,13 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 )
 
-// New создаёт Operation с UUID, текущим временем, done=false.
-// domainPrefix используется для маршрутизации в api-gateway OpsProxy:
-// например "rm" / "vpc" / "compute" — финальный ID = "<prefix>_<uuid>".
-// Если prefix пуст — ID без prefix (legacy/internal use).
+// New создаёт Operation с YC-style 20-char id, текущим временем, done=false.
+// domainPrefix — 3-символьный префикс из ids.PrefixOperationRM /
+// ids.PrefixOperationVPC, по которому api-gateway opsproxy маршрутизирует
+// Operation.Get/Cancel в нужный backend.
+//
+// Если prefix пуст — id без prefix (legacy/internal use); такая операция не
+// маршрутизируется через opsproxy и доступна только локально внутри сервиса.
 //
 // metadata — proto-сообщение специфичное для типа RPC
 // (например, CreateInstanceMetadata{instance_id: uid}).
@@ -26,9 +29,12 @@ func New(domainPrefix, description string, metadata proto.Message) (Operation, e
 		}
 	}
 
-	id := ids.NewUID()
-	if domainPrefix != "" {
-		id = domainPrefix + "_" + id
+	var id string
+	if domainPrefix == "" {
+		// legacy без префикса: используем NewUID (rev-sentinel id).
+		id = ids.NewUID()
+	} else {
+		id = ids.NewID(domainPrefix)
 	}
 
 	now := time.Now().UTC()
