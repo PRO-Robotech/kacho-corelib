@@ -34,8 +34,12 @@ func (b *Builder) Err() error {
 // Конструкторы per §14
 
 // NotFound создаёт ошибку 404 с ResourceInfo detail.
+//
+// Текст сообщения — verbatim YC: `<Kind> '<id>' was not found` (см.
+// YC-DIFF-GET-NONEXISTENT-CODE.md). Используется resource-manager (Cloud,
+// Folder, Organization).
 func NotFound(kind, id string) *Builder {
-	b := newBuilder(codes.NotFound, kind+" "+id+" not found")
+	b := newBuilder(codes.NotFound, kind+" '"+id+"' was not found")
 	if st2, err := b.st.WithDetails(&errdetails.ResourceInfo{
 		ResourceType: kind, ResourceName: id,
 	}); err == nil {

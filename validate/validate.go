@@ -22,11 +22,25 @@ import (
 	coreerrors "github.com/PRO-Robotech/kacho-corelib/errors"
 )
 
-// nameRe — verbatim YC contract name regex.
+// nameRe — verbatim YC name regex для resource-manager / Folder / Cloud
+// (strict-policy resources). Эквивалент YC `/[a-z]([-a-z0-9]{0,61}[a-z0-9])?/`.
 //
 // Ровно: первый символ — строчная буква; далее — буквы, цифры, дефис; последний
 // символ — буква или цифра (не дефис). Длина 2..63.
 var nameRe = regexp.MustCompile(`^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`)
+
+// nameReVPC — verbatim YC permissive regex для VPC ресурсов
+// (Network/Subnet/Address/RouteTable). Эквивалент YC
+// `/|[a-zA-Z]([-_a-zA-Z0-9]{0,61}[a-zA-Z0-9])?/`. Допускает:
+//   - empty string,
+//   - заглавные буквы,
+//   - underscore.
+//
+// Согласно probe реального YC API (2026-05-04): VPC.Network/Subnet/Address/
+// RouteTable принимают `BadCAPS`, `abc_def`, `""` (HTTP 200 + Operation), но
+// отклоняют имя начинающееся с цифры или превышающее 63 символа. См. finding
+// YC-DIFF-NAME-VALIDATION.md.
+var nameReVPC = regexp.MustCompile(`^([a-zA-Z]([-_a-zA-Z0-9]{0,61}[a-zA-Z0-9])?)?$`)
 
 // labelKeyRe — YC label key regex (строчные + цифры + `-_./\`).
 var labelKeyRe = regexp.MustCompile(`^[a-z][-_./\\a-z0-9]{0,62}$`)
@@ -59,7 +73,9 @@ const (
 	DefaultPageSize int64 = 50
 )
 
-// Name проверяет, что value соответствует verbatim YC name-контракту.
+// Name проверяет, что value соответствует verbatim YC name-контракту для
+// strict-policy ресурсов (resource-manager: Cloud, Folder; YC использует
+// `/[a-z]([-a-z0-9]{0,61}[a-z0-9])?/`).
 //
 // Возвращает err типа InvalidArgument с FieldViolation, либо nil если ok.
 // Не проверяет «is required» — это делает caller отдельной проверкой
@@ -68,6 +84,22 @@ func Name(field, value string) error {
 	if !nameRe.MatchString(value) {
 		return coreerrors.InvalidArgument().
 			AddFieldViolation(field, field+` must match ^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$ (lowercase letters, digits, hyphens; starts with letter, ends with letter or digit; 2..63 chars)`).
+			Err()
+	}
+	return nil
+}
+
+// NameVPC проверяет, что value соответствует verbatim YC permissive name-
+// контракту для VPC ресурсов (Network, Subnet, Address, RouteTable; YC
+// использует `/|[a-zA-Z]([-_a-zA-Z0-9]{0,61}[a-zA-Z0-9])?/`).
+//
+// Допускается: empty string, заглавные буквы, underscore. Длина 0..63.
+// Имя начинающееся с цифры или с дефиса — InvalidArgument. См. finding
+// YC-DIFF-NAME-VALIDATION.md.
+func NameVPC(field, value string) error {
+	if !nameReVPC.MatchString(value) {
+		return coreerrors.InvalidArgument().
+			AddFieldViolation(field, field+` must match ^([a-zA-Z]([-_a-zA-Z0-9]{0,61}[a-zA-Z0-9])?)?$ (letters, digits, hyphens, underscores; starts with letter; up to 63 chars; empty allowed)`).
 			Err()
 	}
 	return nil

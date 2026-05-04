@@ -1,6 +1,7 @@
 package validate
 
 import (
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -44,6 +45,51 @@ func TestPageSize(t *testing.T) {
 			}
 			if eff != tc.wantEff {
 				t.Fatalf("expected eff=%d, got %d", tc.wantEff, eff)
+			}
+		})
+	}
+}
+
+func TestNameVPC(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{name: "empty", input: "", wantErr: false},
+		{name: "lowercase", input: "abc"},
+		{name: "uppercase", input: "BadCAPS"},
+		{name: "underscore", input: "abc_def"},
+		{name: "hyphen", input: "abc-def"},
+		{name: "mixed", input: "Abc_Def-09"},
+		{name: "max-63", input: strings.Repeat("a", 63), wantErr: false},
+		{name: "starts-with-digit", input: "1bad", wantErr: true},
+		{name: "starts-with-hyphen", input: "-bad", wantErr: true},
+		{name: "starts-with-underscore", input: "_bad", wantErr: true},
+		{name: "ends-with-hyphen", input: "abc-", wantErr: true},
+		{name: "too-long-64", input: strings.Repeat("a", 64), wantErr: true},
+		{name: "slash", input: "bad/slash", wantErr: true},
+		{name: "dot", input: "bad.dot", wantErr: true},
+		{name: "single-letter", input: "x", wantErr: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := NameVPC("name", tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got nil", tc.input)
+				}
+				st, ok := status.FromError(err)
+				if !ok {
+					t.Fatalf("expected gRPC status, got: %v", err)
+				}
+				if st.Code() != codes.InvalidArgument {
+					t.Fatalf("expected InvalidArgument, got %v", st.Code())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tc.input, err)
 			}
 		})
 	}
