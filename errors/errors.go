@@ -10,6 +10,7 @@ import (
 type Builder struct {
 	st         *status.Status
 	violations []*errdetails.BadRequest_FieldViolation
+	locale     string // если установлен — добавляется LocalizedMessage detail
 }
 
 func newBuilder(c codes.Code, msg string) *Builder {
@@ -22,13 +23,39 @@ func (b *Builder) AddFieldViolation(field, desc string) *Builder {
 	return b
 }
 
-// Err собирает итоговую ошибку с деталями.
+// WithLocale устанавливает locale для LocalizedMessage detail.
+// При Err() добавится detail вида:
+//
+//	{ "@type": "type.googleapis.com/google.rpc.LocalizedMessage", "locale": "<locale>", "message": "<status.message>" }
+//
+// Если locale пустой — LocalizedMessage не добавляется.
+func (b *Builder) WithLocale(locale string) *Builder {
+	b.locale = locale
+	return b
+}
+
+// Err собирает итоговую ошибку с деталями (BadRequest, опционально LocalizedMessage).
+//
+// LocalizedMessage добавляется ТОЛЬКО если был вызван WithLocale("<locale>")
+// с непустым locale. По умолчанию Kachō возвращает только BadRequest — это
+// осознанная Kachō decision (более structured, machine-readable), отличная от
+// YC (LocalizedMessage + RequestInfo). См. LOCALIZED-ERRORS-MISSING.md.
 func (b *Builder) Err() error {
+	st := b.st
 	if len(b.violations) > 0 {
-		st, _ := b.st.WithDetails(&errdetails.BadRequest{FieldViolations: b.violations})
-		return st.Err()
+		if next, derr := st.WithDetails(&errdetails.BadRequest{FieldViolations: b.violations}); derr == nil {
+			st = next
+		}
 	}
-	return b.st.Err()
+	if b.locale != "" {
+		if next, derr := st.WithDetails(&errdetails.LocalizedMessage{
+			Locale:  b.locale,
+			Message: st.Message(),
+		}); derr == nil {
+			st = next
+		}
+	}
+	return st.Err()
 }
 
 // Конструкторы per §14

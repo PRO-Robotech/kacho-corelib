@@ -260,26 +260,41 @@ func (r *pgRepo) MarkError(ctx context.Context, id string, errStatus *status.Sta
 	return nil
 }
 
+// ErrAlreadyDone возвращается из Cancel, если операция уже завершена.
+var ErrAlreadyDone = errors.New("operation already completed")
+
 // Cancel переводит операцию в done=true со статусом CANCELLED (gRPC code 1).
+// Если операция уже done — возвращает ErrAlreadyDone (FAILED_PRECONDITION).
+// Если операция не существует — возвращает ErrNotFound.
 func (r *pgRepo) Cancel(ctx context.Context, id string) error {
 	cancelledCode := int32(1) // codes.Cancelled
 	cancelledMsg := "operation cancelled"
 
+	// UPDATE only when done=false, чтобы детектировать "already done" по rows-affected.
 	q := fmt.Sprintf(`
 		UPDATE %s
 		SET done = true, modified_at = $2,
 		    error_code = $3, error_message = $4
-		WHERE id = $1`,
+		WHERE id = $1 AND done = false`,
 		r.tableName(),
 	)
 	tag, err := r.pool.Exec(ctx, q, id, time.Now().UTC(), cancelledCode, cancelledMsg)
 	if err != nil {
 		return fmt.Errorf("repo.Cancel: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+	if tag.RowsAffected() == 1 {
+		return nil
 	}
-	return nil
+	// 0 rows: либо запись не существует, либо done=true. Различим через Get.
+	op, getErr := r.Get(ctx, id)
+	if getErr != nil {
+		return getErr // ErrNotFound или другое
+	}
+	if op.Done {
+		return ErrAlreadyDone
+	}
+	// race: только что был done=false, но UPDATE не сработал — отдадим ErrNotFound как safe-default.
+	return ErrNotFound
 }
 
 // ---- helpers ----
