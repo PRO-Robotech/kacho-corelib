@@ -36,14 +36,16 @@ const totalLen = 3 + idBodyLen
 // PrefixNetwork (enp…). Это позволяет gateway-у одной таблицей
 // маршрутизировать и Operation.Get, и любые ресурсные RPC.
 const (
-	PrefixCloud         = "b1g"
-	PrefixFolder        = "b1g"
-	PrefixOrganization  = "bpf"
-	PrefixNetwork       = "enp"
-	PrefixSubnet        = "e9b"
-	PrefixAddress       = "e9b"
-	PrefixRouteTable    = "enp"
-	PrefixSecurityGroup = "enp"
+	PrefixCloud           = "b1g"
+	PrefixFolder          = "b1g"
+	PrefixOrganization    = "bpf"
+	PrefixNetwork         = "enp"
+	PrefixSubnet          = "e9b"
+	PrefixAddress         = "e9b"
+	PrefixRouteTable      = "enp"
+	PrefixSecurityGroup   = "enp"
+	PrefixGateway         = "enp"
+	PrefixPrivateEndpoint = "enp"
 
 	// Operation prefix per service-domain — совпадает с префиксом
 	// «головного» ресурса домена (по convention reference-API).
