@@ -43,8 +43,17 @@ var nameRe = regexp.MustCompile(`^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`)
 // YC-DIFF-NAME-VALIDATION.md.
 var nameReVPC = regexp.MustCompile(`^([a-zA-Z]([-_a-zA-Z0-9]{0,61}[a-zA-Z0-9])?)?$`)
 
-// labelKeyRe — YC label key regex (строчные + цифры + `-_./\`).
-var labelKeyRe = regexp.MustCompile(`^[a-z][-_./\\a-z0-9]{0,62}$`)
+// nameReGateway — verbatim YC strict-permissive name regex для VPC Gateway.
+// Эквивалент YC `/|[a-z]([-a-z0-9]{0,61}[a-z0-9])?/` (см. gateway_service.proto:154):
+// strict lowercase + digits + hyphens + empty allowed. Без uppercase / underscore
+// (в отличие от nameReVPC). Тот же контракт для других strict-policy resources с
+// разрешённой пустой строкой.
+var nameReGateway = regexp.MustCompile(`^([a-z]([-a-z0-9]{0,61}[a-z0-9])?)?$`)
+
+// labelKeyRe — YC label key regex: строчные + цифры + `-_./\@`. Согласно proto
+// `(map_key).pattern = "[a-z][-_./\\@0-9a-z]*"` (см. *_service.proto во всех
+// VPC доменах), `@` входит в character class.
+var labelKeyRe = regexp.MustCompile(`^[a-z][-_./\\@a-z0-9]{0,62}$`)
 
 // allowedZones — verbatim whitelist зон для Kachō (ровно YC verbatim).
 //
@@ -101,6 +110,19 @@ func NameVPC(field, value string) error {
 	if !nameReVPC.MatchString(value) {
 		return coreerrors.InvalidArgument().
 			AddFieldViolation(field, field+` must match ^([a-zA-Z]([-_a-zA-Z0-9]{0,61}[a-zA-Z0-9])?)?$ (letters, digits, hyphens, underscores; starts with letter; up to 63 chars; empty allowed)`).
+			Err()
+	}
+	return nil
+}
+
+// NameGateway — verbatim YC name-контракт для Gateway: strict (lowercase +
+// digits + hyphens) с разрешённой пустой строкой. Эквивалент YC
+// `/|[a-z]([-a-z0-9]{0,61}[a-z0-9])?/` (gateway_service.proto:154, 184).
+// Без uppercase и underscore (в отличие от NameVPC).
+func NameGateway(field, value string) error {
+	if !nameReGateway.MatchString(value) {
+		return coreerrors.InvalidArgument().
+			AddFieldViolation(field, field+` must match ^([a-z]([-a-z0-9]{0,61}[a-z0-9])?)?$ (lowercase letters, digits, hyphens; starts with letter; up to 63 chars; empty allowed)`).
 			Err()
 	}
 	return nil
