@@ -184,7 +184,7 @@ func TestWriter_A3_NotifyAfterCommit(t *testing.T) {
 	dsn := pool.Config().ConnString()
 	listenConn, err := pgx.Connect(ctx, dsn)
 	require.NoError(t, err)
-	defer listenConn.Close(ctx)
+	defer func() { _ = listenConn.Close(ctx) }()
 
 	_, err = listenConn.Exec(ctx, "LISTEN kacho_resource_manager")
 	require.NoError(t, err)

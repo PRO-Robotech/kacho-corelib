@@ -20,7 +20,7 @@ import (
 
 const createTable = `
 CREATE TABLE IF NOT EXISTS operations (
-  id            UUID         PRIMARY KEY,
+  id            TEXT         PRIMARY KEY,
   description   TEXT         NOT NULL,
   created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
   created_by    TEXT         NOT NULL DEFAULT 'anonymous',
@@ -82,7 +82,7 @@ func TestRepo_Create_Get(t *testing.T) {
 	ctx := context.Background()
 	repo := newRepo(pool)
 
-	op, err := operations.New("test create/get", nil)
+	op, err := operations.New("opx", "test create/get", nil)
 	require.NoError(t, err)
 	op.CreatedAt = op.CreatedAt.Round(time.Microsecond)
 	op.ModifiedAt = op.ModifiedAt.Round(time.Microsecond)
@@ -115,7 +115,7 @@ func TestRepo_MarkDone(t *testing.T) {
 	ctx := context.Background()
 	repo := newRepo(pool)
 
-	op, err := operations.New("test mark done", nil)
+	op, err := operations.New("opx", "test mark done", nil)
 	require.NoError(t, err)
 	require.NoError(t, repo.Create(ctx, op))
 
@@ -141,7 +141,7 @@ func TestRepo_MarkError_WithDetails(t *testing.T) {
 	ctx := context.Background()
 	repo := newRepo(pool)
 
-	op, err := operations.New("test mark error", nil)
+	op, err := operations.New("opx", "test mark error", nil)
 	require.NoError(t, err)
 	require.NoError(t, repo.Create(ctx, op))
 
@@ -169,7 +169,7 @@ func TestRepo_List_FilterByResourceID(t *testing.T) {
 
 	// Создаём несколько операций без привязки к ресурсу
 	for i := 0; i < 3; i++ {
-		op, err := operations.New(fmt.Sprintf("op %d", i), nil)
+		op, err := operations.New("opx", fmt.Sprintf("op %d", i), nil)
 		require.NoError(t, err)
 		require.NoError(t, repo.Create(ctx, op))
 	}
@@ -211,7 +211,7 @@ func TestRepo_List_Pagination(t *testing.T) {
 
 	// Создаём 5 операций
 	for i := 0; i < 5; i++ {
-		op, err := operations.New(fmt.Sprintf("paginate op %d", i), nil)
+		op, err := operations.New("opx", fmt.Sprintf("paginate op %d", i), nil)
 		require.NoError(t, err)
 		require.NoError(t, repo.Create(ctx, op))
 	}
@@ -245,7 +245,7 @@ func TestRepo_Cancel(t *testing.T) {
 	ctx := context.Background()
 	repo := newRepo(pool)
 
-	op, err := operations.New("test cancel", nil)
+	op, err := operations.New("opx", "test cancel", nil)
 	require.NoError(t, err)
 	require.NoError(t, repo.Create(ctx, op))
 
@@ -264,7 +264,7 @@ func TestWorker_Success(t *testing.T) {
 	ctx := context.Background()
 	repo := newRepo(pool)
 
-	op, err := operations.New("worker success test", nil)
+	op, err := operations.New("opx", "worker success test", nil)
 	require.NoError(t, err)
 	require.NoError(t, repo.Create(ctx, op))
 
@@ -301,7 +301,7 @@ func TestWorker_Failure(t *testing.T) {
 	ctx := context.Background()
 	repo := newRepo(pool)
 
-	op, err := operations.New("worker failure test", nil)
+	op, err := operations.New("opx", "worker failure test", nil)
 	require.NoError(t, err)
 	require.NoError(t, repo.Create(ctx, op))
 
@@ -330,7 +330,7 @@ func TestWorker_Failure(t *testing.T) {
 // TestNew_WithMetadata — helpers.New создаёт Operation с правильными полями.
 func TestNew_WithMetadata(t *testing.T) {
 	meta := wrapperspb.String("instance-uid-xyz")
-	op, err := operations.New("create instance", meta)
+	op, err := operations.New("opx", "create instance", meta)
 	require.NoError(t, err)
 
 	assert.NotEmpty(t, op.ID)
@@ -344,7 +344,7 @@ func TestNew_WithMetadata(t *testing.T) {
 
 // TestNew_NilMetadata — helpers.New без metadata.
 func TestNew_NilMetadata(t *testing.T) {
-	op, err := operations.New("no metadata op", nil)
+	op, err := operations.New("opx", "no metadata op", nil)
 	require.NoError(t, err)
 	assert.NotEmpty(t, op.ID)
 	assert.Nil(t, op.Metadata)
