@@ -20,6 +20,9 @@ import (
 	"regexp"
 	"unicode/utf8"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	coreerrors "github.com/PRO-Robotech/kacho-corelib/errors"
 )
 
@@ -43,6 +46,14 @@ var nameRe = regexp.MustCompile(`^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`)
 // YC-DIFF-NAME-VALIDATION.md.
 var nameReVPC = regexp.MustCompile(`^([a-zA-Z]([-_a-zA-Z0-9]{0,61}[a-zA-Z0-9])?)?$`)
 
+// nameReCompute — verbatim YC permissive name regex для Compute ресурсов
+// (Disk/Image/Snapshot/Instance). Эквивалент YC proto `(pattern) =
+// "|[a-z]([-_a-z0-9]{0,61}[a-z0-9])?"` — **lowercase**-only + digits + hyphens +
+// underscore, empty allowed, начинается с буквы, не оканчивается дефисом, длина
+// 0..63. Отличие от nameReVPC: НЕТ uppercase. (TODO: probe реального YC Compute
+// API для точного контракта — см. kacho-compute/docs/architecture/07-known-divergences.md.)
+var nameReCompute = regexp.MustCompile(`^([a-z]([-_a-z0-9]{0,61}[a-z0-9])?)?$`)
+
 // nameReGateway — verbatim YC strict-permissive name regex для VPC Gateway.
 // Эквивалент YC `/|[a-z]([-a-z0-9]{0,61}[a-z0-9])?/` (см. gateway_service.proto:154):
 // strict lowercase + digits + hyphens + empty allowed. Без uppercase / underscore
@@ -55,16 +66,6 @@ var nameReGateway = regexp.MustCompile(`^([a-z]([-a-z0-9]{0,61}[a-z0-9])?)?$`)
 // VPC доменах), `@` входит в character class.
 var labelKeyRe = regexp.MustCompile(`^[a-z][-_./\\@a-z0-9]{0,62}$`)
 
-// allowedZones — verbatim whitelist зон для Kachō (ровно YC verbatim).
-//
-// Любой `zoneId` вне этого списка — InvalidArgument; пустой `zoneId` —
-// InvalidArgument с сообщением `zone_id is required`.
-var allowedZones = map[string]struct{}{
-	"ru-central1-a": {},
-	"ru-central1-b": {},
-	"ru-central1-c": {},
-	"ru-central1-d": {},
-}
 
 const (
 	// MaxNameLen — максимум для Name полей ресурсов (verbatim YC).
@@ -110,6 +111,21 @@ func NameVPC(field, value string) error {
 	if !nameReVPC.MatchString(value) {
 		return coreerrors.InvalidArgument().
 			AddFieldViolation(field, field+` must match ^([a-zA-Z]([-_a-zA-Z0-9]{0,61}[a-zA-Z0-9])?)?$ (letters, digits, hyphens, underscores; starts with letter; up to 63 chars; empty allowed)`).
+			Err()
+	}
+	return nil
+}
+
+// NameCompute проверяет, что value соответствует verbatim YC permissive name-
+// контракту для Compute ресурсов (Disk, Image, Snapshot, Instance; YC proto
+// `(pattern) = "|[a-z]([-_a-z0-9]{0,61}[a-z0-9])?"`).
+//
+// Допускается: empty string, underscore. Только lowercase (в отличие от NameVPC).
+// Начинается с буквы; не оканчивается дефисом; длина 0..63.
+func NameCompute(field, value string) error {
+	if !nameReCompute.MatchString(value) {
+		return coreerrors.InvalidArgument().
+			AddFieldViolation(field, field+` must match ^([a-z]([-_a-z0-9]{0,61}[a-z0-9])?)?$ (lowercase letters, digits, hyphens, underscores; starts with letter; up to 63 chars; empty allowed)`).
 			Err()
 	}
 	return nil
@@ -184,21 +200,19 @@ func PageSize(field string, value int64) (int64, error) {
 	return value, nil
 }
 
-// ZoneId проверяет, что value — валидное имя зоны Kachō.
+// ZoneId — format/required-валидация: проверяет, что value не пустой.
 //
-// Контракт verbatim YC: `ru-central1-{a,b,c,d}`. Пустая строка — отдельная
-// проверка `zone_id is required` (FieldViolation), значение вне whitelist —
-// `zone_id must be one of: ru-central1-a/b/c/d` (FieldViolation). Возвращает
-// InvalidArgument с FieldViolation либо nil.
+// Список валидных зон НЕ хардкодится. Existence-валидация (есть ли такая
+// зона в БД) — ответственность сервиса, владеющего таблицей `zones`
+// (kacho-vpc). Здесь только required-check — формируем единообразный
+// FieldViolation для пустого zone_id.
+//
+// Пустая строка → InvalidArgument c FieldViolation `<field> is required`.
+// Непустое значение → nil (caller обязан выполнить existence-check).
 func ZoneId(field, value string) error {
 	if value == "" {
 		return coreerrors.InvalidArgument().
 			AddFieldViolation(field, field+" is required").
-			Err()
-	}
-	if _, ok := allowedZones[value]; !ok {
-		return coreerrors.InvalidArgument().
-			AddFieldViolation(field, field+" must be one of: ru-central1-a, ru-central1-b, ru-central1-c, ru-central1-d").
 			Err()
 	}
 	return nil
@@ -292,4 +306,44 @@ func UpdateMask(field string, mask []string, known map[string]struct{}) error {
 		}
 	}
 	return nil
+}
+
+// resourceIDPrefixes — известные 3-символьные prefix'ы resource-id'ов Kachō
+// (из kacho-corelib/ids: Cloud/Folder=b1g, Organization=bpf, Network/RT/SG/GW/PE=enp,
+// Subnet/Address=e9b, Instance/Disk=epd, Image/Snapshot=fd8). Если появится новый
+// домен с новым prefix — добавить сюда.
+var resourceIDPrefixes = map[string]struct{}{
+	"b1g": {}, "bpf": {}, "enp": {}, "e9b": {}, "epd": {}, "fd8": {},
+}
+
+// ResourceID проверяет, что resource-id синтаксически валиден — начинается с
+// известного 3-символьного prefix Kachō (см. resourceIDPrefixes). Пустой id —
+// пропускается (required-проверка / transcoding-роутинг — отдельно).
+//
+// verbatim-YC (probe 2026-05-11): на malformed / нераспознанный resource-id
+// мутирующие и read-RPC отдают sync `InvalidArgument` с flat-message
+// `"invalid <resourceType> id '<id>'"` (НЕ `NotFound`). Семантика **family-agnostic**:
+// prefix должен быть из известного набора, но НЕ обязан совпадать с типом ресурса
+// (`enp`-id, переданный как subnet-id, проходит → дальше `repo.Get` → `NotFound`) —
+// как у реального YC. Длину/алфавит тела внутри здесь не проверяем (YC лоялен).
+//
+//	resourceType   — имя ресурса в нижнем регистре ("network", "subnet",
+//	                 "security group", "folder", "gateway", "private endpoint", ...).
+//	expectedPrefix — ожидаемый prefix этого ресурса (ids.PrefixNetwork и т.п.); сейчас
+//	                 в проверке не используется (family-agnostic — см. выше), оставлен
+//	                 в сигнатуре для читаемости call-site'ов и на случай strict-режима.
+//
+// Возвращаемая ошибка — готовый gRPC `status` с нужным flat-message (не
+// field-violation builder — YC даёт именно flat-message в этом случае).
+func ResourceID(resourceType, expectedPrefix, id string) error {
+	_ = expectedPrefix
+	if id == "" {
+		return nil
+	}
+	if len(id) >= 3 {
+		if _, ok := resourceIDPrefixes[id[:3]]; ok {
+			return nil
+		}
+	}
+	return status.Errorf(codes.InvalidArgument, "invalid %s id '%s'", resourceType, id)
 }

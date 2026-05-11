@@ -96,19 +96,18 @@ func TestNameVPC(t *testing.T) {
 }
 
 func TestZoneId(t *testing.T) {
+	// ZoneId — required-only валидация. Existence-проверка вынесена в сервис
+	// (kacho-vpc обращается к таблице `zones`). Любая непустая строка
+	// проходит format-уровень; existence отвергается асинхронно сервисом.
 	cases := []struct {
 		name    string
 		input   string
 		wantErr bool
 	}{
-		{name: "ok-a", input: "ru-central1-a", wantErr: false},
-		{name: "ok-b", input: "ru-central1-b", wantErr: false},
-		{name: "ok-c", input: "ru-central1-c", wantErr: false},
-		{name: "ok-d", input: "ru-central1-d", wantErr: false},
 		{name: "empty", input: "", wantErr: true},
-		{name: "out-of-list-z", input: "ru-central1-z", wantErr: true},
-		{name: "wrong-region", input: "ru-central2-a", wantErr: true},
-		{name: "garbage", input: "invalid-zone", wantErr: true},
+		{name: "any-non-empty-a", input: "ru-central1-a", wantErr: false},
+		{name: "any-non-empty-other-region", input: "ru-central2-a", wantErr: false},
+		{name: "any-non-empty-garbage", input: "invalid-zone", wantErr: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

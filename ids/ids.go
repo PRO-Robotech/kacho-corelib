@@ -47,10 +47,19 @@ const (
 	PrefixGateway         = "enp"
 	PrefixPrivateEndpoint = "enp"
 
+	// compute: Instance/Disk делят `epd`, Image/Snapshot делят `fd8` (зеркалит
+	// VPC-группировку); все compute-операции получают `epd` (== PrefixInstance),
+	// чтобы api-gateway opsproxy мог одним правилом маршрутизировать Operation.Get.
+	PrefixInstance = "epd"
+	PrefixDisk     = "epd"
+	PrefixImage    = "fd8"
+	PrefixSnapshot = "fd8"
+
 	// Operation prefix per service-domain — совпадает с префиксом
 	// «головного» ресурса домена (по convention reference-API).
-	PrefixOperationRM  = PrefixCloud   // resource-manager: b1g
-	PrefixOperationVPC = PrefixNetwork // vpc: enp
+	PrefixOperationRM      = PrefixCloud    // resource-manager: b1g
+	PrefixOperationVPC     = PrefixNetwork  // vpc: enp
+	PrefixOperationCompute = PrefixInstance // compute: epd
 )
 
 // NewID возвращает идентификатор формата "<prefix><17-char crockford-base32>"
