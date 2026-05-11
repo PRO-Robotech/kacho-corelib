@@ -43,6 +43,14 @@ var nameRe = regexp.MustCompile(`^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`)
 // YC-DIFF-NAME-VALIDATION.md.
 var nameReVPC = regexp.MustCompile(`^([a-zA-Z]([-_a-zA-Z0-9]{0,61}[a-zA-Z0-9])?)?$`)
 
+// nameReCompute — verbatim YC permissive name regex для Compute ресурсов
+// (Disk/Image/Snapshot/Instance). Эквивалент YC proto `(pattern) =
+// "|[a-z]([-_a-z0-9]{0,61}[a-z0-9])?"` — **lowercase**-only + digits + hyphens +
+// underscore, empty allowed, начинается с буквы, не оканчивается дефисом, длина
+// 0..63. Отличие от nameReVPC: НЕТ uppercase. (TODO: probe реального YC Compute
+// API для точного контракта — см. kacho-compute/docs/architecture/07-known-divergences.md.)
+var nameReCompute = regexp.MustCompile(`^([a-z]([-_a-z0-9]{0,61}[a-z0-9])?)?$`)
+
 // nameReGateway — verbatim YC strict-permissive name regex для VPC Gateway.
 // Эквивалент YC `/|[a-z]([-a-z0-9]{0,61}[a-z0-9])?/` (см. gateway_service.proto:154):
 // strict lowercase + digits + hyphens + empty allowed. Без uppercase / underscore
@@ -100,6 +108,21 @@ func NameVPC(field, value string) error {
 	if !nameReVPC.MatchString(value) {
 		return coreerrors.InvalidArgument().
 			AddFieldViolation(field, field+` must match ^([a-zA-Z]([-_a-zA-Z0-9]{0,61}[a-zA-Z0-9])?)?$ (letters, digits, hyphens, underscores; starts with letter; up to 63 chars; empty allowed)`).
+			Err()
+	}
+	return nil
+}
+
+// NameCompute проверяет, что value соответствует verbatim YC permissive name-
+// контракту для Compute ресурсов (Disk, Image, Snapshot, Instance; YC proto
+// `(pattern) = "|[a-z]([-_a-z0-9]{0,61}[a-z0-9])?"`).
+//
+// Допускается: empty string, underscore. Только lowercase (в отличие от NameVPC).
+// Начинается с буквы; не оканчивается дефисом; длина 0..63.
+func NameCompute(field, value string) error {
+	if !nameReCompute.MatchString(value) {
+		return coreerrors.InvalidArgument().
+			AddFieldViolation(field, field+` must match ^([a-z]([-_a-z0-9]{0,61}[a-z0-9])?)?$ (lowercase letters, digits, hyphens, underscores; starts with letter; up to 63 chars; empty allowed)`).
 			Err()
 	}
 	return nil
