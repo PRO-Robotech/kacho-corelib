@@ -20,6 +20,9 @@ import (
 	"regexp"
 	"unicode/utf8"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	coreerrors "github.com/PRO-Robotech/kacho-corelib/errors"
 )
 
@@ -303,4 +306,44 @@ func UpdateMask(field string, mask []string, known map[string]struct{}) error {
 		}
 	}
 	return nil
+}
+
+// resourceIDPrefixes — известные 3-символьные prefix'ы resource-id'ов Kachō
+// (из kacho-corelib/ids: Cloud/Folder=b1g, Organization=bpf, Network/RT/SG/GW/PE=enp,
+// Subnet/Address=e9b, Instance/Disk=epd, Image/Snapshot=fd8). Если появится новый
+// домен с новым prefix — добавить сюда.
+var resourceIDPrefixes = map[string]struct{}{
+	"b1g": {}, "bpf": {}, "enp": {}, "e9b": {}, "epd": {}, "fd8": {},
+}
+
+// ResourceID проверяет, что resource-id синтаксически валиден — начинается с
+// известного 3-символьного prefix Kachō (см. resourceIDPrefixes). Пустой id —
+// пропускается (required-проверка / transcoding-роутинг — отдельно).
+//
+// verbatim-YC (probe 2026-05-11): на malformed / нераспознанный resource-id
+// мутирующие и read-RPC отдают sync `InvalidArgument` с flat-message
+// `"invalid <resourceType> id '<id>'"` (НЕ `NotFound`). Семантика **family-agnostic**:
+// prefix должен быть из известного набора, но НЕ обязан совпадать с типом ресурса
+// (`enp`-id, переданный как subnet-id, проходит → дальше `repo.Get` → `NotFound`) —
+// как у реального YC. Длину/алфавит тела внутри здесь не проверяем (YC лоялен).
+//
+//	resourceType   — имя ресурса в нижнем регистре ("network", "subnet",
+//	                 "security group", "folder", "gateway", "private endpoint", ...).
+//	expectedPrefix — ожидаемый prefix этого ресурса (ids.PrefixNetwork и т.п.); сейчас
+//	                 в проверке не используется (family-agnostic — см. выше), оставлен
+//	                 в сигнатуре для читаемости call-site'ов и на случай strict-режима.
+//
+// Возвращаемая ошибка — готовый gRPC `status` с нужным flat-message (не
+// field-violation builder — YC даёт именно flat-message в этом случае).
+func ResourceID(resourceType, expectedPrefix, id string) error {
+	_ = expectedPrefix
+	if id == "" {
+		return nil
+	}
+	if len(id) >= 3 {
+		if _, ok := resourceIDPrefixes[id[:3]]; ok {
+			return nil
+		}
+	}
+	return status.Errorf(codes.InvalidArgument, "invalid %s id '%s'", resourceType, id)
 }
