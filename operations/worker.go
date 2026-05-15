@@ -11,6 +11,15 @@
 //     истечёт. Используется в graceful-shutdown handler'а сервиса.
 //   - panic в fn перехватывается через recover() → MarkError, не валит
 //     процесс целиком.
+//
+// Context-propagation (baggage):
+//   - Worker НЕ наследует deadline / cancel callerCtx — request-ctx
+//     cancel-ится сразу как handler возвращает Operation клиенту, а worker
+//     должен жить независимо.
+//   - Worker НАСЛЕДУЕТ observability-values callerCtx (OTel SpanContext,
+//     request-id, slog logger, tenant claims, любые WithValue-ключи) через
+//     baggage.Extract — иначе worker-логи и trace-span'ы оторваны от
+//     исходного запроса (AP-3 в evgeniy skill).
 package operations
 
 import (
@@ -25,6 +34,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/anypb"
+
+	"github.com/PRO-Robotech/kacho-corelib/baggage"
 )
 
 // defaultRegistry — pkg-level worker tracker. Используется Run() для
@@ -81,14 +92,22 @@ func (w *Worker) Wait(ctx context.Context) error {
 
 // runOn — internal launcher: increments WG + active, defer'ed decrement,
 // recover() перехватывает panic в fn → MarkError, не валит процесс.
-func (w *Worker) runOn(repo Repo, opID string, fn func(context.Context) (*anypb.Any, error)) {
+//
+// callerCtx — request-ctx handler-а. Worker НЕ наследует его deadline /
+// cancel, но через baggage.Extract сохраняет все Values (OTel SpanContext,
+// request-id, slog logger, tenant claims) — иначе worker-логи и трейсы
+// оторваны от исходного запроса.
+func (w *Worker) runOn(callerCtx context.Context, repo Repo, opID string, fn func(context.Context) (*anypb.Any, error)) {
 	w.wg.Add(1)
 	w.active.Add(1)
 	go func() {
 		defer w.wg.Done()
 		defer w.active.Add(-1)
 
-		bgCtx := context.Background()
+		// baggage.Extract сохраняет observability-values из callerCtx
+		// (OTel span, request-id, slog logger, tenant claims), но
+		// отрезает deadline/cancel — worker автономен.
+		workerCtx := baggage.Extract(callerCtx)
 		var resp *anypb.Any
 		var err error
 
@@ -101,7 +120,7 @@ func (w *Worker) runOn(repo Repo, opID string, fn func(context.Context) (*anypb.
 					err = fmt.Errorf("panic in operation worker: %v\n%s", r, stack)
 				}
 			}()
-			resp, err = fn(bgCtx)
+			resp, err = fn(workerCtx)
 		}()
 
 		if err != nil {
@@ -126,23 +145,24 @@ func (w *Worker) runOn(repo Repo, opID string, fn func(context.Context) (*anypb.
 
 // Run — backward-compatible API: запускает worker в default-registry.
 //
-// КРИТИЧНО: input ctx — это request-context handler-а, который cancel-ится
-// сразу после возврата handler-ом ответа клиенту. Использовать его в worker-е
-// нельзя — все cross-service gRPC-вызовы внутри fn упадут с "context canceled".
-// Поэтому worker запускается с **detached** context.Background(), не наследуя
-// deadline / cancel из request.
+// callerCtx — request-context handler-а. Из него ИЗВЛЕКАЮТСЯ значимые values
+// (OTel SpanContext, request-id, slog logger, tenant claims) через
+// baggage.Extract — они propagate'ятся в worker-ctx и в fn. Это критично
+// для distributed-tracing и structured-logging: без этого worker-логи и
+// trace-span'ы оторваны от исходного запроса (см. AP-3 в evgeniy skill).
 //
-// Если в будущем потребуется trace-propagation — извлекать конкретные values
-// (e.g. request-id) из request-ctx и переносить в bg-ctx через context.WithValue.
-func Run(ctx context.Context, repo Repo, opID string, fn func(context.Context) (*anypb.Any, error)) {
-	_ = ctx // intentionally unused — см. примечание выше
-	defaultRegistry.runOn(repo, opID, fn)
+// При этом worker НЕ наследует deadline/cancel callerCtx: handler возвращает
+// Operation клиенту сразу, request-ctx cancel-ится через миллисекунды, а
+// worker должен жить независимо до завершения. Если внутри fn нужен timeout —
+// fn оборачивает свой workerCtx в context.WithTimeout сам.
+func Run(callerCtx context.Context, repo Repo, opID string, fn func(context.Context) (*anypb.Any, error)) {
+	defaultRegistry.runOn(callerCtx, repo, opID, fn)
 }
 
 // RunWithWorker — вариант для тестов / multi-tenant сервисов: использует
-// явный Worker registry вместо default'ного.
-func RunWithWorker(w *Worker, repo Repo, opID string, fn func(context.Context) (*anypb.Any, error)) {
-	w.runOn(repo, opID, fn)
+// явный Worker registry вместо default'ного. Семантика callerCtx — как у Run.
+func RunWithWorker(w *Worker, callerCtx context.Context, repo Repo, opID string, fn func(context.Context) (*anypb.Any, error)) {
+	w.runOn(callerCtx, repo, opID, fn)
 }
 
 // Wait — pkg-level: ждёт окончания всех active workers в default-registry.
