@@ -407,6 +407,15 @@ func scanOperation(row interface {
 		}
 	}
 
+	// KAC-107 followup: восстанавливаем Principal из колонок БД. Без этого
+	// `Repo.Get(id).Principal` всегда был zero-value, а handler operationToProto
+	// возвращал пустые principal_* поля даже при правильно записанной DB-строке.
+	op.Principal = Principal{
+		Type:        principalType,
+		ID:          principalID,
+		DisplayName: principalDisplay,
+	}
+
 	return &op, nil
 }
 
