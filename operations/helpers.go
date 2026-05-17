@@ -49,6 +49,26 @@ func New(domainPrefix, description string, metadata proto.Message) (Operation, e
 	}, nil
 }
 
+// NewFromContext — то же что New, но также заполняет op.Principal из ctx
+// (через PrincipalFromContext). Удобный shortcut для use-case'ов, которые
+// после KAC-107 E2 получают Principal в ctx от auth-interceptor api-gateway.
+//
+// Без ctx-Principal — op.Principal остаётся zero (Create в repo сделает
+// fallback к SystemPrincipal). С ctx-Principal — он переносится в op.Principal,
+// и Create / CreateWithPrincipal будут использовать его как источник правды.
+func NewFromContext(ctx interface {
+	Value(any) any
+}, domainPrefix, description string, metadata proto.Message) (Operation, error) {
+	op, err := New(domainPrefix, description, metadata)
+	if err != nil {
+		return op, err
+	}
+	if v, ok := ctx.Value(principalCtxKey{}).(Principal); ok && v != (Principal{}) {
+		op.Principal = v
+	}
+	return op, nil
+}
+
 // MetadataFor извлекает типизированные метаданные из операции.
 // Возвращает ошибку, если Metadata nil или тип не совпадает.
 func MetadataFor[T proto.Message](op *Operation) (T, error) {
