@@ -19,12 +19,21 @@ package grpcsrv
 
 import (
 	"context"
+	"log/slog"
+	"os"
+	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/PRO-Robotech/kacho-corelib/operations"
 )
+
+// debugExtract — debug-log incoming metadata + principal-extract decisions.
+// Enabled via env KACHO_DEBUG_PRINCIPAL=1 (off by default). Useful for
+// troubleshooting REST → gRPC metadata propagation issues.
+var debugExtract = os.Getenv("KACHO_DEBUG_PRINCIPAL") == "1"
+var debugLogger = slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 const (
 	MDKeyPrincipalType    = "x-kacho-principal-type"
@@ -59,17 +68,34 @@ func (s *principalStream) Context() context.Context { return s.ctx }
 func extractPrincipal(ctx context.Context) context.Context {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
+		if debugExtract {
+			debugLogger.Info("principal_extract: no incoming metadata")
+		}
 		return ctx
+	}
+	if debugExtract {
+		// Dump all metadata keys for debugging.
+		keys := make([]string, 0, len(md))
+		for k := range md {
+			keys = append(keys, k+"="+strings.Join(md.Get(k), ","))
+		}
+		debugLogger.Info("principal_extract: incoming metadata", "keys", strings.Join(keys, "; "))
 	}
 	pType := first(md.Get(MDKeyPrincipalType))
 	pID := first(md.Get(MDKeyPrincipalID))
 	if pType == "" || pID == "" {
+		if debugExtract {
+			debugLogger.Info("principal_extract: missing principal headers", "type", pType, "id", pID)
+		}
 		return ctx
 	}
 	p := operations.Principal{
 		Type:        pType,
 		ID:          pID,
 		DisplayName: first(md.Get(MDKeyPrincipalDisplay)),
+	}
+	if debugExtract {
+		debugLogger.Info("principal_extract: principal set", "type", p.Type, "id", p.ID)
 	}
 	return operations.WithPrincipal(ctx, p)
 }
