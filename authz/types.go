@@ -1,0 +1,216 @@
+package authz
+
+import (
+	"context"
+	"errors"
+	"fmt"
+)
+
+// ObjectExtractor извлекает (object_type, object_id) из request'а конкретного
+// RPC.
+//
+// Для типичных RPC (Get/Update/Delete на ресурс) — возвращает фиксированный
+// object_type из RPCEntry и динамический object_id из request'а (например
+// `GetNetworkRequest.network_id`).
+//
+// Для scope-conditional RPC (например `iam.AccessBindingService.Upsert`, где
+// scope в request: account / project / resource) — возвращает оба значения
+// зависимо от полей request'а. См. §4.4 edge case в acceptance.
+type ObjectExtractor func(req any) (objectType string, objectID string, err error)
+
+// StaticExtractor — helper для типичного случая, когда object_type фиксирован
+// в RPCEntry, а ID extract'ится из конкретного поля request'а.
+//
+// Пример:
+//
+//	"/kacho.cloud.vpc.v1.NetworkService/Get": {
+//	    Relation: "viewer",
+//	    Extract:  authz.StaticExtractor("vpc_network", func(req any) (string, error) {
+//	        return req.(*vpcv1.GetNetworkRequest).GetNetworkId(), nil
+//	    }),
+//	},
+func StaticExtractor(objectType string, extractID func(req any) (string, error)) ObjectExtractor {
+	return func(req any) (string, string, error) {
+		id, err := extractID(req)
+		if err != nil {
+			return "", "", err
+		}
+		return objectType, id, nil
+	}
+}
+
+// RPCEntry — описание прав, требуемых на конкретный RPC.
+//
+// Заполняется в per-service `internal/metadata/permission_map.go`:
+//
+//	var PermissionMap = authz.RPCMap{
+//	    "/kacho.cloud.vpc.v1.NetworkService/Get": {
+//	        Relation: "viewer",
+//	        Extract:  authz.StaticExtractor("vpc_network", ...),
+//	    },
+//	    ...
+//	}
+type RPCEntry struct {
+	// Relation — FGA-relation, требуемое на object'е.
+	// "viewer" | "editor" | "admin" | "use" | "start_stop" | etc.
+	Relation string
+
+	// Extract — функция, извлекающая (object_type, object_id) из request'а.
+	// Возвращаемый objectType+":"+objectID составляет FGA object string.
+	//
+	// Для статичных object_type — используй StaticExtractor.
+	// Для scope-conditional — пиши full ObjectExtractor.
+	Extract ObjectExtractor
+
+	// Public — если false, RPC считается internal (запрет #6) и
+	// interceptor его пропускает (no Check). Default false.
+	//
+	// Обычно internal-сервисы поднимаются на отдельном listener'е
+	// :9091 без interceptor'а вовсе; но если internal RPC регистрируется
+	// в общем server, это поле явно его освобождает от authz.
+	Public bool
+}
+
+// RPCMap — карта `<FullMethod>` → RPCEntry. Передаётся в Interceptor.
+//
+// FullMethod (grpc-go convention): "/<package>.<service>/<method>", напр.
+// "/kacho.cloud.vpc.v1.NetworkService/Get".
+type RPCMap map[string]RPCEntry
+
+// Lookup возвращает RPCEntry, ok — если найден.
+func (m RPCMap) Lookup(fullMethod string) (RPCEntry, bool) {
+	e, ok := m[fullMethod]
+	return e, ok
+}
+
+// PrincipalLike — узкий port-интерфейс для Principal'а. Используется
+// interceptor'ом, чтобы не зависеть от operations.Principal напрямую (хотя
+// и фактически он его реализует).
+//
+// Реализация — `operations.Principal` (поле .ID).
+type PrincipalLike interface {
+	GetID() string
+}
+
+// Decision — что interceptor решил сделать с RPC.
+type Decision int
+
+const (
+	// DecisionAllowed — разрешено (Check вернул allowed=true или break-glass).
+	DecisionAllowed Decision = iota
+	// DecisionDenied — отказано (Check вернул allowed=false).
+	DecisionDenied
+	// DecisionUnavailable — FGA / kacho-iam недоступны (fail-closed).
+	DecisionUnavailable
+	// DecisionUnmapped — RPC не в RPCMap (fail-closed по умолчанию).
+	DecisionUnmapped
+	// DecisionInternal — RPC помечен Public=false / internal — пропуск.
+	DecisionInternal
+	// DecisionRateLimited — превышен per-Principal rate limit on denied storm.
+	DecisionRateLimited
+)
+
+// String — human-readable representation, используется в метриках / логах.
+func (d Decision) String() string {
+	switch d {
+	case DecisionAllowed:
+		return "allowed"
+	case DecisionDenied:
+		return "denied"
+	case DecisionUnavailable:
+		return "unavailable"
+	case DecisionUnmapped:
+		return "unmapped"
+	case DecisionInternal:
+		return "internal"
+	case DecisionRateLimited:
+		return "rate_limited"
+	}
+	return "unknown"
+}
+
+// ErrUnmapped — RPC не покрыт RPCMap. Должен мапиться в `PermissionDenied`
+// (fail-closed). Метрика `kacho_authz_unmapped_total{rpc=...}` инкрементируется.
+var ErrUnmapped = errors.New("authz: RPC not mapped in PermissionMap")
+
+// ErrUnavailable — FGA / kacho-iam.Check недоступны. fail-closed default.
+var ErrUnavailable = errors.New("authz: check service unavailable")
+
+// FormatObject форматирует FGA-object string: "<type>:<id>".
+// Возвращает err если type/id содержат запрещённые символы (':', whitespace).
+func FormatObject(objectType, objectID string) (string, error) {
+	if objectType == "" {
+		return "", fmt.Errorf("authz: empty object type")
+	}
+	if objectID == "" {
+		return "", fmt.Errorf("authz: empty object id")
+	}
+	for _, r := range objectType {
+		if r == ':' || r == ' ' || r == '\t' || r == '\n' {
+			return "", fmt.Errorf("authz: invalid char in object type: %q", objectType)
+		}
+	}
+	for _, r := range objectID {
+		if r == ':' || r == ' ' || r == '\t' || r == '\n' {
+			return "", fmt.Errorf("authz: invalid char in object id: %q", objectID)
+		}
+	}
+	return objectType + ":" + objectID, nil
+}
+
+// FormatSubject форматирует FGA-subject string из Principal'а.
+//
+// Mapping (см. acceptance §4.6):
+//   - Principal{Type:"user", ID:"usr_xxx"}            → "user:usr_xxx"
+//   - Principal{Type:"service_account", ID:"sva_xxx"} → "service_account:sva_xxx"
+//   - Principal{Type:"system", ID:"bootstrap"}        → "user:bootstrap" (для аудита;
+//     обычно system-principal обходит interceptor через internal-path).
+//
+// Group-principal'ы в этом mapping'е не появляются: для group-binding'ов FGA
+// разрешает access через `group:<id>#member` tuple — но subject в Check всегда
+// конкретный user / SA (resolved от Principal в auth-interceptor'е).
+func FormatSubject(principalType, principalID string) string {
+	if principalID == "" {
+		// Защита от вырожденного случая; вызов с пустым ID — bug.
+		principalID = "unknown"
+	}
+	switch principalType {
+	case "user", "service_account":
+		return principalType + ":" + principalID
+	default:
+		// system / anonymous / unknown — мапим как user (fallback аудит).
+		return "user:" + principalID
+	}
+}
+
+// methodIsInternal — проверка, что метод относится к Internal*-сервису по
+// naming convention proto-имени.
+//
+// FullMethod в grpc-go: "/<pkg>.<service>/<method>", например
+// "/kacho.cloud.iam.v1.InternalIAMService/Check" — здесь `Internal` идёт
+// после `.`. Также покрывает редкий случай method'а вида
+// "/<pkg>.<service>/InternalFoo".
+//
+// Используется как defensive fallback: если RPC не в Map, но имя сервиса
+// явно internal — пропускаем (на public listener эти RPC всё равно не
+// маршрутизируются api-gateway'ем; защита от misconfig'а).
+func methodIsInternal(fullMethod string) bool {
+	const marker = "Internal"
+	// Ищем "<sep>Internal" где sep ∈ {'/', '.'} (начало method или service).
+	for i := 0; i+len(marker) <= len(fullMethod); i++ {
+		if fullMethod[i:i+len(marker)] != marker {
+			continue
+		}
+		if i == 0 {
+			return true
+		}
+		c := fullMethod[i-1]
+		if c == '/' || c == '.' {
+			return true
+		}
+	}
+	return false
+}
+
+// _ — compile-time check, that context is imported.
+var _ = context.Background
