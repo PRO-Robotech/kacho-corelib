@@ -65,6 +65,12 @@ func NewFromContext(ctx interface {
 	}
 	if v, ok := ctx.Value(principalCtxKey{}).(Principal); ok && v != (Principal{}) {
 		op.Principal = v
+		// Также синхронизируем CreatedBy с principal.ID для backward-compat
+		// (старые клиенты читают createdBy; новые — principal_*). Default
+		// "anonymous" из New() сохраняется только если ctx-principal нет.
+		if v.ID != "" {
+			op.CreatedBy = v.ID
+		}
 	}
 	return op, nil
 }
