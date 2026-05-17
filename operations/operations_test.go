@@ -20,20 +20,23 @@ import (
 
 const createTable = `
 CREATE TABLE IF NOT EXISTS operations (
-  id            TEXT         PRIMARY KEY,
-  description   TEXT         NOT NULL,
-  created_at    TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  created_by    TEXT         NOT NULL DEFAULT 'anonymous',
-  modified_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
-  done          BOOLEAN      NOT NULL DEFAULT false,
-  metadata_type TEXT,
-  metadata_data BYTEA,
-  resource_id   TEXT,
-  error_code    INT,
-  error_message TEXT,
-  error_details BYTEA,
-  response_type TEXT,
-  response_data BYTEA
+  id                     TEXT         PRIMARY KEY,
+  description            TEXT         NOT NULL,
+  created_at             TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  created_by             TEXT         NOT NULL DEFAULT 'anonymous',
+  modified_at            TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  done                   BOOLEAN      NOT NULL DEFAULT false,
+  metadata_type          TEXT,
+  metadata_data          BYTEA,
+  resource_id            TEXT,
+  error_code             INT,
+  error_message          TEXT,
+  error_details          BYTEA,
+  response_type          TEXT,
+  response_data          BYTEA,
+  principal_type         TEXT         NOT NULL DEFAULT 'system',
+  principal_id           TEXT         NOT NULL DEFAULT 'bootstrap',
+  principal_display_name TEXT         NOT NULL DEFAULT 'System'
 );
 CREATE INDEX IF NOT EXISTS operations_resource_idx   ON operations (resource_id);
 CREATE INDEX IF NOT EXISTS operations_done_idx        ON operations (done);

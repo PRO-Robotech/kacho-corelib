@@ -17,10 +17,17 @@ import (
 )
 
 // Repo — интерфейс для хранения и обновления Operations.
-// Каждый сервис создаёт таблицу operations через migration (см. migrations/common/0001_operations.sql).
+// Каждый сервис создаёт таблицу operations через migration (см.
+// migrations/common/0001_operations.sql + 0002_operations_principal.sql).
 type Repo interface {
-	// Create сохраняет новую операцию (done=false).
+	// Create сохраняет новую операцию (done=false). Principal записывается
+	// как SystemPrincipal — backward-compat shim. Use-case с auth-ctx должен
+	// вызывать CreateWithPrincipal (или передавать op.Principal заранее).
 	Create(ctx context.Context, op Operation) error
+	// CreateWithPrincipal сохраняет новую операцию с явно переданным
+	// principal'ом. Вызывается из use-case'ов сервисов после
+	// PrincipalFromContext(ctx).
+	CreateWithPrincipal(ctx context.Context, op Operation, p Principal) error
 	// Get возвращает операцию по ID. Возвращает ErrNotFound если операции нет.
 	Get(ctx context.Context, id string) (*Operation, error)
 	// List возвращает список операций с постраничной навигацией.
@@ -61,8 +68,24 @@ func (r *pgRepo) tableName() string {
 	return pgx.Identifier{r.schema, "operations"}.Sanitize()
 }
 
-// Create вставляет операцию в таблицу.
+// Create вставляет операцию в таблицу. Принципал по умолчанию —
+// SystemPrincipal (backward-compat shim для сервисов, ещё не пробросивших
+// auth-ctx до repo). Use-case с auth-ctx должен использовать
+// CreateWithPrincipal либо предварительно заполнить op.Principal и вызывать
+// CreateWithPrincipal(ctx, op, op.Principal).
 func (r *pgRepo) Create(ctx context.Context, op Operation) error {
+	// Если op.Principal заполнен (например, явно set'нут helper'ом New) —
+	// уважаем; иначе fallback к SystemPrincipal.
+	p := op.Principal
+	if p == (Principal{}) {
+		p = SystemPrincipal()
+	}
+	return r.CreateWithPrincipal(ctx, op, p)
+}
+
+// CreateWithPrincipal вставляет операцию с явно переданным principal'ом.
+// Если каноничный путь use-case'а — PrincipalFromContext(ctx) → этот метод.
+func (r *pgRepo) CreateWithPrincipal(ctx context.Context, op Operation, p Principal) error {
 	metaType, metaData, err := marshalAny(op.Metadata)
 	if err != nil {
 		return fmt.Errorf("repo.Create: marshal metadata: %w", err)
@@ -71,12 +94,18 @@ func (r *pgRepo) Create(ctx context.Context, op Operation) error {
 	// Извлекаем resource_id из метаданных (денормализованный индекс для фильтрации).
 	resourceID := extractResourceID(op.Metadata)
 
+	// Fallback на SystemPrincipal если передан пустой p (defensive).
+	if p == (Principal{}) {
+		p = SystemPrincipal()
+	}
+
 	q := fmt.Sprintf(`
 		INSERT INTO %s
 		  (id, description, created_at, created_by, modified_at, done,
-		   metadata_type, metadata_data, resource_id)
+		   metadata_type, metadata_data, resource_id,
+		   principal_type, principal_id, principal_display_name)
 		VALUES
-		  ($1, $2, $3, $4, $5, false, $6, $7, $8)`,
+		  ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11)`,
 		r.tableName(),
 	)
 
@@ -94,6 +123,9 @@ func (r *pgRepo) Create(ctx context.Context, op Operation) error {
 		metaType,
 		metaData,
 		nullableString(resourceID),
+		p.Type,
+		p.ID,
+		p.DisplayName,
 	)
 	if err != nil {
 		return fmt.Errorf("repo.Create: %w", err)
@@ -107,7 +139,8 @@ func (r *pgRepo) Get(ctx context.Context, id string) (*Operation, error) {
 		SELECT id, description, created_at, created_by, modified_at, done,
 		       metadata_type, metadata_data,
 		       error_code, error_message, error_details,
-		       response_type, response_data
+		       response_type, response_data,
+		       principal_type, principal_id, principal_display_name
 		FROM %s
 		WHERE id = $1`,
 		r.tableName(),
@@ -163,7 +196,8 @@ func (r *pgRepo) List(ctx context.Context, filter ListFilter) ([]Operation, stri
 		SELECT id, description, created_at, created_by, modified_at, done,
 		       metadata_type, metadata_data,
 		       error_code, error_message, error_details,
-		       response_type, response_data
+		       response_type, response_data,
+		       principal_type, principal_id, principal_display_name
 		FROM %s
 		%s
 		ORDER BY created_at ASC, id ASC
@@ -311,6 +345,7 @@ func scanOperation(row interface {
 	var errDetails *[]byte
 	var respType *string
 	var respData *[]byte
+	var principalType, principalID, principalDisplay string
 
 	err := row.Scan(
 		&op.ID,
@@ -326,11 +361,20 @@ func scanOperation(row interface {
 		&errDetails,
 		&respType,
 		&respData,
+		&principalType,
+		&principalID,
+		&principalDisplay,
 	)
 	if err != nil {
 		return nil, err
 	}
 	_ = metaType
+
+	op.Principal = Principal{
+		Type:        principalType,
+		ID:          principalID,
+		DisplayName: principalDisplay,
+	}
 
 	// восстанавливаем Metadata
 	if metaTypeStr != nil && metaData != nil {
