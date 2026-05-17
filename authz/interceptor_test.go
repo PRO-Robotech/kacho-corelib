@@ -183,16 +183,12 @@ func TestInterceptor_NoPrincipalDenied(t *testing.T) {
 		t.Fatalf("Check should NOT be called when no Principal")
 		return false, nil
 	})
-	intr := authz.NewInterceptor(authz.InterceptorOptions{
-		Map:    makeMap(),
-		Client: stub,
-	})
 	// No principal in ctx — PrincipalFromContext returns system{ID:bootstrap}.
 	// AllowSystemPrincipal=false (default) → it should reach Check (subject=user:bootstrap).
 	// Switch test to assert that the empty path through SubjectExtractor returns ok=true
 	// for system; but Check stub fails the test. To assert no-principal explicitly,
 	// override SubjectExtractor.
-	intr = authz.NewInterceptor(authz.InterceptorOptions{
+	intr := authz.NewInterceptor(authz.InterceptorOptions{
 		Map:    makeMap(),
 		Client: stub,
 		SubjectExtractor: func(ctx context.Context) (string, string, bool) {
