@@ -34,6 +34,9 @@ func newMemRepo() *memRepo {
 }
 
 func (m *memRepo) Create(context.Context, operations.Operation) error { return nil }
+func (m *memRepo) CreateWithPrincipal(context.Context, operations.Operation, operations.Principal) error {
+	return nil
+}
 func (m *memRepo) Get(context.Context, string) (*operations.Operation, error) {
 	return nil, operations.ErrNotFound
 }

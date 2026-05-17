@@ -16,6 +16,9 @@ import (
 //go:embed 0001_operations.sql
 var migrationSQL string
 
+//go:embed 0002_operations_principal.sql
+var migration0002SQL string
+
 // setupPostgres поднимает контейнер Postgres с чистой схемой.
 func setupPostgres(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -191,4 +194,112 @@ func TestMigration_C3_Idempotent(t *testing.T) {
 	`).Scan(&tableExists)
 	require.NoError(t, err)
 	assert.True(t, tableExists, "таблица operations должна существовать после повторного up")
+}
+
+// apply0002Up — Up-секция миграции 0002.
+func apply0002Up(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	upSQL := extractGooseSection(migration0002SQL, "Up")
+	require.NotEmpty(t, upSQL)
+	_, err := pool.Exec(context.Background(), upSQL)
+	require.NoError(t, err)
+}
+
+// apply0002Down — Down-секция миграции 0002.
+func apply0002Down(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	downSQL := extractGooseSection(migration0002SQL, "Down")
+	require.NotEmpty(t, downSQL)
+	_, err := pool.Exec(context.Background(), downSQL)
+	require.NoError(t, err)
+}
+
+// C4: Миграция 0002 добавляет principal_type / principal_id /
+// principal_display_name с правильными DEFAULT'ами.
+func TestMigration_C4_PrincipalColumns(t *testing.T) {
+	pool := setupPostgres(t)
+	ctx := context.Background()
+
+	applyMigrationUp(t, pool)
+	apply0002Up(t, pool)
+
+	expectedCols := []string{
+		"principal_type",
+		"principal_id",
+		"principal_display_name",
+	}
+	var colCount int
+	err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM information_schema.columns
+		WHERE table_name = 'operations'
+		  AND column_name = ANY($1)
+		  AND is_nullable = 'NO'
+	`, expectedCols).Scan(&colCount)
+	require.NoError(t, err)
+	assert.Equal(t, len(expectedCols), colCount,
+		"все три principal-колонки должны быть NOT NULL")
+
+	// Проверка DEFAULT-значений: вставляем строку без principal-полей и
+	// смотрим, что в БД появились stub'ы 'system'/'bootstrap'/'System'.
+	_, err = pool.Exec(ctx, `
+		INSERT INTO operations (id, description) VALUES ('op-defaults', 'no-auth-ctx')
+	`)
+	require.NoError(t, err)
+
+	var pt, pid, pdn string
+	err = pool.QueryRow(ctx, `
+		SELECT principal_type, principal_id, principal_display_name
+		FROM operations WHERE id = 'op-defaults'
+	`).Scan(&pt, &pid, &pdn)
+	require.NoError(t, err)
+	assert.Equal(t, "system", pt)
+	assert.Equal(t, "bootstrap", pid)
+	assert.Equal(t, "System", pdn)
+}
+
+// C5: Миграция 0002 идемпотентна (up → down → up).
+func TestMigration_C5_0002Idempotent(t *testing.T) {
+	pool := setupPostgres(t)
+	ctx := context.Background()
+
+	applyMigrationUp(t, pool)
+	apply0002Up(t, pool)
+	apply0002Down(t, pool)
+	apply0002Up(t, pool)
+
+	// После повторного up принципал-колонки снова на месте.
+	var colCount int
+	err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM information_schema.columns
+		WHERE table_name = 'operations'
+		  AND column_name IN ('principal_type','principal_id','principal_display_name')
+	`).Scan(&colCount)
+	require.NoError(t, err)
+	assert.Equal(t, 3, colCount)
+}
+
+// C6: Миграция 0002 back-fill'ит существующие строки stub-значениями.
+func TestMigration_C6_0002BackfillExisting(t *testing.T) {
+	pool := setupPostgres(t)
+	ctx := context.Background()
+
+	// Применяем 0001 и вставляем «доисторическую» строку без principal-полей.
+	applyMigrationUp(t, pool)
+	_, err := pool.Exec(ctx, `
+		INSERT INTO operations (id, description) VALUES ('legacy-op', 'pre-iam')
+	`)
+	require.NoError(t, err)
+
+	// Поверх — миграция 0002. Существующая строка должна получить DEFAULT'ы.
+	apply0002Up(t, pool)
+
+	var pt, pid, pdn string
+	err = pool.QueryRow(ctx, `
+		SELECT principal_type, principal_id, principal_display_name
+		FROM operations WHERE id = 'legacy-op'
+	`).Scan(&pt, &pid, &pdn)
+	require.NoError(t, err)
+	assert.Equal(t, "system", pt)
+	assert.Equal(t, "bootstrap", pid)
+	assert.Equal(t, "System", pdn)
 }
