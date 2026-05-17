@@ -95,9 +95,3 @@ func (rl *rateLimiter) EvictInactive(maxAge time.Duration) int {
 	return removed
 }
 
-// setNowFunc — для тестов: подмена time.Now.
-func (rl *rateLimiter) setNowFunc(now func() time.Time) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	rl.now = now
-}
