@@ -187,20 +187,13 @@ func (i *Interceptor) authorize(ctx context.Context, fullMethod string, req any)
 	// anonymous'у создавать VPC/Compute ресурсы. Теперь breakglass лишь
 	// эмулирует "all authenticated users allowed", не "everyone allowed".
 	if i.opts.Breakglass {
-		// Anonymous всегда denied — даже в breakglass mode (security gate).
-		subjectFGA, principalID, ok := i.opts.SubjectExtractor(ctx)
-		if !ok || principalID == "" || principalID == "anonymous" ||
-			subjectFGA == "system:anonymous" || subjectFGA == "" {
+		if isAnonymousSubject(i.opts.SubjectExtractor, ctx) {
 			atomic.AddUint64(&i.deniedTotal, 1)
-			logger.Warn("authz_breakglass_anonymous_denied",
-				slog.String("subject", subjectFGA),
-				slog.String("principal_id", principalID))
+			logger.Warn("authz_breakglass_anonymous_denied")
 			return DecisionDenied, nil
 		}
 		atomic.AddUint64(&i.breakglassTotal, 1)
-		logger.Warn("authz_breakglass_used",
-			slog.String("subject", subjectFGA),
-			slog.String("principal_id", principalID))
+		logger.Warn("authz_breakglass_used")
 		return DecisionAllowed, nil
 	}
 
