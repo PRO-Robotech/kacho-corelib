@@ -11,7 +11,8 @@ import (
 
 // ListenInvalidator подключается к kacho_iam Postgres через dedicated pgx-conn
 // (НЕ из пула — required для LISTEN; godzila §16) и слушает channel
-// `kacho_iam_subjects`. На каждый NOTIFY → `cache.InvalidateBySubject(payload)`.
+// `kacho_iam_subjects`. На каждый NOTIFY → `cache.InvalidateBySubject(payload)`
+// + `ListObjects.InvalidateBySubject(payload)` (если service выставлен).
 //
 // Lifecycle:
 //   - Run(ctx) — блокирующий loop, до cancel ctx.
@@ -26,8 +27,12 @@ type ListenInvalidator struct {
 	// Channel — обычно "kacho_iam_subjects".
 	Channel string
 
-	// Cache — кеш, на котором будем invalidate.
+	// Cache — Check-cache, на котором будем invalidate (опционально).
 	Cache *Cache
+
+	// ListObjects — KAC-127 Phase 4: ListObjects-cache для list-filtering
+	// (опционально). На NOTIFY вызывается InvalidateBySubject(payload).
+	ListObjects *ListObjectsService
 
 	// Logger.
 	Logger *slog.Logger
@@ -42,8 +47,8 @@ func (li *ListenInvalidator) Run(ctx context.Context) error {
 	if li.Channel == "" {
 		li.Channel = "kacho_iam_subjects"
 	}
-	if li.Cache == nil {
-		return errors.New("authz.ListenInvalidator: Cache is nil")
+	if li.Cache == nil && li.ListObjects == nil {
+		return errors.New("authz.ListenInvalidator: Cache and ListObjects are both nil")
 	}
 	logger := li.Logger
 	if logger == nil {
@@ -62,7 +67,7 @@ func (li *ListenInvalidator) Run(ctx context.Context) error {
 				case <-ctx.Done():
 					return
 				case <-fullClearTicker.C:
-					li.Cache.InvalidateAll()
+					li.invalidateAll()
 					logger.Info("authz_periodic_full_cache_clear")
 				}
 			}
@@ -80,7 +85,7 @@ func (li *ListenInvalidator) Run(ctx context.Context) error {
 		if err != nil {
 			logger.Warn("authz_listen_conn_drop", slog.String("err", err.Error()), slog.Duration("backoff", backoff))
 			// Conservative — invalidate всё, чтобы не пропустить NOTIFY.
-			li.Cache.InvalidateAll()
+			li.invalidateAll()
 		}
 		select {
 		case <-ctx.Done():
@@ -118,11 +123,31 @@ func (li *ListenInvalidator) runOnce(ctx context.Context, logger *slog.Logger) e
 		subjectID := notif.Payload
 		if subjectID == "" {
 			// Conservative — empty payload means "invalidate all".
-			li.Cache.InvalidateAll()
+			li.invalidateAll()
 			logger.Info("authz_invalidate_all_via_notify")
 			continue
 		}
-		li.Cache.InvalidateBySubject(subjectID)
+		li.invalidateBySubject(subjectID)
 		logger.Debug("authz_invalidate_subject", slog.String("subject_id", subjectID))
+	}
+}
+
+// invalidateBySubject вызывает InvalidateBySubject у обоих кэшей (если они заданы).
+func (li *ListenInvalidator) invalidateBySubject(subjectID string) {
+	if li.Cache != nil {
+		li.Cache.InvalidateBySubject(subjectID)
+	}
+	if li.ListObjects != nil {
+		li.ListObjects.InvalidateBySubject(subjectID)
+	}
+}
+
+// invalidateAll вызывает InvalidateAll у обоих кэшей (если они заданы).
+func (li *ListenInvalidator) invalidateAll() {
+	if li.Cache != nil {
+		li.Cache.InvalidateAll()
+	}
+	if li.ListObjects != nil {
+		li.ListObjects.InvalidateAll()
 	}
 }
