@@ -182,12 +182,17 @@ func (i *Interceptor) authorize(ctx context.Context, fullMethod string, req any)
 		slog.String("service", i.opts.ServiceName),
 	)
 
-	// 1. Break-glass — обходит всё (D-6).
+	// 1. Break-glass — обходит Keto-Check, но **anonymous всё равно denied**.
+	// KAC-122 CRIT-6/7 root-cause fix: breakglass=true ранее позволял
+	// anonymous'у создавать VPC/Compute ресурсы. Теперь breakglass лишь
+	// эмулирует "all authenticated users allowed", не "everyone allowed".
 	if i.opts.Breakglass {
+		if isAnonymousSubject(i.opts.SubjectExtractor, ctx) {
+			atomic.AddUint64(&i.deniedTotal, 1)
+			logger.Warn("authz_breakglass_anonymous_denied")
+			return DecisionDenied, nil
+		}
 		atomic.AddUint64(&i.breakglassTotal, 1)
-		// Rate-limit warn'ов 1/s глобально — здесь упрощённо: WARN на каждый.
-		// На production — обернуть через rate-limit logger (slog не имеет
-		// сейчас native rate-limit'а; добавляется как middleware).
 		logger.Warn("authz_breakglass_used")
 		return DecisionAllowed, nil
 	}
