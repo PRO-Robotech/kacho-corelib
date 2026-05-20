@@ -36,6 +36,13 @@ func makeMap() authz.RPCMap {
 				return req.(*fakeReq).id, nil
 			}),
 		},
+		// KAC-127 #25: scope-filtered List RPC — interceptor skips the
+		// per-RPC Check; the handler authorises at the data level.
+		"/kacho.cloud.vpc.v1.NetworkService/List": {
+			Relation:      "viewer",
+			ScopeFiltered: true,
+			Extract:       authz.StaticExtractor("project", networkExtractor),
+		},
 	}
 }
 
@@ -172,6 +179,30 @@ func TestInterceptor_InternalRPCBypassed(t *testing.T) {
 	resp, err := runUnary(intr, ctx, "/kacho.cloud.iam.v1.InternalIAMService/Check", &fakeReq{id: "x"})
 	if err != nil {
 		t.Fatalf("expected internal RPC pass, got %v", err)
+	}
+	if resp != "handled" {
+		t.Fatalf("expected handler called")
+	}
+}
+
+// KAC-127 #25: a ScopeFiltered RPC must NOT trigger the per-RPC Check — the
+// handler authorises at the data level (ListObjects-filtered result). A
+// single-object Check would 403 the whole call before the scope-filter runs.
+func TestInterceptor_ScopeFilteredRPCBypassesCheck(t *testing.T) {
+	stub := authz.CheckClientFunc(func(ctx context.Context, s, r, o string) (bool, error) {
+		t.Fatalf("Check must NOT be called on a ScopeFiltered RPC")
+		return false, nil
+	})
+	intr := authz.NewInterceptor(authz.InterceptorOptions{
+		Map:    makeMap(),
+		Client: stub,
+	})
+	// A non-member principal — the handler (not the interceptor) would
+	// scope-filter the result to empty; the interceptor must let it through.
+	ctx := ctxWithPrincipal(t, "usr_nonmember", "user")
+	resp, err := runUnary(intr, ctx, "/kacho.cloud.vpc.v1.NetworkService/List", &fakeReq{id: "prj_x"})
+	if err != nil {
+		t.Fatalf("expected scope-filtered RPC to pass the interceptor, got %v", err)
 	}
 	if resp != "handled" {
 		t.Fatalf("expected handler called")

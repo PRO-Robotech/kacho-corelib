@@ -69,6 +69,21 @@ type RPCEntry struct {
 	// :9091 без interceptor'а вовсе; но если internal RPC регистрируется
 	// в общем server, это поле явно его освобождает от authz.
 	Public bool
+
+	// ScopeFiltered — KAC-127 #25. Если true, interceptor НЕ делает
+	// single-object Check для этого RPC: RPC сам авторизует на data-уровне
+	// (scope-filter List — handler через ListObjects резолвит allowed-set и
+	// возвращает 200 + filtered, EMPTY если доступа нет; см.
+	// authz.ListObjectsService). Единичный per-RPC Check здесь семантически
+	// неверен — он отверг бы весь вызов `no path` 403 ДО того, как
+	// scope-filter отработает.
+	//
+	// Отличие от Public: ScopeFiltered RPC — публичный, требует
+	// аутентификации (валидный JWT на api-gateway); пропускается ТОЛЬКО
+	// per-RPC authz-Check. Public — internal-RPC (запрет #6), вообще вне
+	// tenant-authz. Mapping в `DecisionInternal` (skip) — общий, но смысл
+	// разный, поэтому отдельное поле.
+	ScopeFiltered bool
 }
 
 // RPCMap — карта `<FullMethod>` → RPCEntry. Передаётся в Interceptor.

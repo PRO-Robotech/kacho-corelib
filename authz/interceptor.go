@@ -214,6 +214,13 @@ func (i *Interceptor) authorize(ctx context.Context, fullMethod string, req any)
 	if entry.Public {
 		return DecisionInternal, nil
 	}
+	if entry.ScopeFiltered {
+		// KAC-127 #25: scope-filtered List RPC — the handler authorises at the
+		// data level (ListObjects-filtered result, 200 + filtered/EMPTY). Skip
+		// the per-RPC Check; a single-object Check would reject the whole call
+		// `no path` 403 before the scope-filter could run.
+		return DecisionInternal, nil
+	}
 
 	// 3. Subject extract.
 	subjectFGA, principalID, ok := i.opts.SubjectExtractor(ctx)
