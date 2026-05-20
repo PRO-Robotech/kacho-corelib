@@ -49,3 +49,15 @@ func IntToUint(v int) uint {
 	}
 	return uint(v)
 }
+
+// IntToUint32 saturates a platform int into the [0, math.MaxUint32] range,
+// flooring negatives at 0.
+func IntToUint32(v int) uint32 {
+	if v < 0 {
+		return 0
+	}
+	if int64(v) > math.MaxUint32 {
+		return math.MaxUint32
+	}
+	return uint32(v)
+}

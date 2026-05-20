@@ -53,3 +53,20 @@ func TestIntToUint(t *testing.T) {
 		t.Errorf("IntToUint(7) = %d, want 7", got)
 	}
 }
+
+func TestIntToUint32(t *testing.T) {
+	cases := []struct {
+		in   int
+		want uint32
+	}{
+		{-1, 0},
+		{0, 0},
+		{1000, 1000},
+		{math.MaxInt32, math.MaxInt32},
+	}
+	for _, c := range cases {
+		if got := IntToUint32(c.in); got != c.want {
+			t.Errorf("IntToUint32(%d) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
