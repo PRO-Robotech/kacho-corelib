@@ -28,6 +28,8 @@ import (
 	"path/filepath"
 
 	"golang.org/x/tools/go/packages"
+
+	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/entrypoints"
 )
 
 // Exit codes form part of archgraph's stable CLI contract.
@@ -101,21 +103,36 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return ExitStartupError
 	}
 
-	if err := loadPackages(repoRoot); err != nil {
+	pkgs, err := loadPackages(repoRoot)
+	if err != nil {
 		writeString(stderr, err.Error()+"\n")
 		return ExitStartupError
 	}
 
-	// Skeleton stubs: package loading succeeded, so the subcommand is
-	// reported as a no-op success. Real generation / auditing arrives
-	// in later tasks.
+	// Build the entry-point inventory: the roots from which later tasks
+	// walk the call-graph. A FQN-resolution failure (B7) is a startup
+	// error — the repository is gRPC-shaped but unanalysable.
+	inv, err := entrypoints.Discover(pkgs)
+	if err != nil {
+		writeString(stderr, err.Error()+"\n")
+		return ExitStartupError
+	}
+
+	// Skeleton stubs: package loading and entry-point discovery
+	// succeeded, so the subcommand is reported as a no-op success.
+	// Real generation / auditing over the inventory arrives in later
+	// tasks; for now the inventory size is surfaced for visibility.
 	switch sub {
 	case subGen:
 		writeString(stdout, fmt.Sprintf(
-			"arch-gen: loaded repository %s (no documentation generated yet)\n", repoRoot))
+			"arch-gen: loaded repository %s (%d entry-points discovered, "+
+				"no documentation generated yet)\n",
+			repoRoot, len(inv.Entries)))
 	case subAudit:
 		writeString(stdout, fmt.Sprintf(
-			"arch-audit: loaded repository %s (no checks run yet)\n", repoRoot))
+			"arch-audit: loaded repository %s (%d entry-points discovered, "+
+				"no checks run yet)\n",
+			repoRoot, len(inv.Entries)))
 	}
 	return ExitOK
 }
@@ -207,8 +224,10 @@ func isFile(path string) bool {
 // repoRoot and fails fast if any package has build or type-check
 // errors. This guarantees later analysis runs only over a sound
 // graph: a compile failure is reported on its own, before any
-// architecture check.
-func loadPackages(repoRoot string) error {
+// architecture check. On success it returns the loaded packages so
+// downstream passes (entry-point discovery, the call-graph) reuse the
+// single load.
+func loadPackages(repoRoot string) ([]*packages.Package, error) {
 	cfg := &packages.Config{
 		Mode: packages.NeedName |
 			packages.NeedFiles |
@@ -227,7 +246,7 @@ func loadPackages(repoRoot string) error {
 	}
 	pkgs, err := packages.Load(cfg, "./...")
 	if err != nil {
-		return fmt.Errorf("failed to load packages: %w", err)
+		return nil, fmt.Errorf("failed to load packages: %w", err)
 	}
 
 	// Collect the first compile error deterministically: packages and
@@ -239,10 +258,10 @@ func loadPackages(repoRoot string) error {
 			if pos == "" {
 				pos = "unknown position"
 			}
-			return fmt.Errorf(
+			return nil, fmt.Errorf(
 				"failed to load packages: %s has compile errors: %s: %s",
 				pkg.PkgPath, pos, e.Msg)
 		}
 	}
-	return nil
+	return pkgs, nil
 }
