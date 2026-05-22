@@ -36,6 +36,7 @@ import (
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/gen"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/note"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/reach"
+	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/status"
 )
 
 // Exit codes form part of archgraph's stable CLI contract.
@@ -134,13 +135,24 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	return ExitOK
 }
 
-// runGen runs the arch-gen pass: it generates the L3 (per-functionality
-// call-tree + reachable exported signatures) and L4 (per-repository
-// domain-type / field / constant tables) artifacts under
-// docs/arch/generated/, then reports what it wrote. The curated L1/L2
-// notes under docs/arch/ are never touched. arch-gen exits 0 on success
-// and ExitStartupError on a reachability or filesystem failure — it
-// raises no architecture verdict of its own.
+// runGen runs the arch-gen pass. It does two things:
+//
+//   - generates the L3 (per-functionality call-tree + reachable exported
+//     signatures) and L4 (per-repository domain-type / field / constant
+//     tables) artifacts under docs/arch/generated/;
+//   - computes each curated L2 note's "status" field from how its anchors
+//     match the discovered entry-point inventory and writes that value
+//     back into the note's frontmatter.
+//
+// The status write-back is surgical — only the "status" scalar of a
+// curated note is rewritten, never its narrative body or any other
+// frontmatter key — and idempotent: a note whose status is already
+// correct is left byte-identical. Together with `git diff --exit-code`
+// in CI this catches a hand-edited status that no longer matches the
+// code.
+//
+// arch-gen exits 0 on success and ExitStartupError on a reachability or
+// filesystem failure — it raises no architecture verdict of its own.
 func runGen(
 	repoRoot string,
 	pkgs []*packages.Package,
@@ -166,10 +178,34 @@ func runGen(
 		return ExitStartupError
 	}
 
+	// Compute and write back the "status" of every curated L2 note. A
+	// note whose computed status already matches its frontmatter is left
+	// untouched (note.Write is idempotent for an unchanged scalar).
+	if err := writeBackStatus(notes, inv); err != nil {
+		writeString(stderr, err.Error()+"\n")
+		return ExitStartupError
+	}
+
 	writeString(stdout, fmt.Sprintf(
 		"arch-gen: generated L3/L4 artifacts under %s/docs/arch/generated\n",
 		repoRoot))
 	return ExitOK
+}
+
+// writeBackStatus computes the status of each L2 note from the entry-point
+// inventory and persists it into the note's frontmatter. The note package
+// rewrites only the "status" scalar, so the curated narrative body and
+// every other frontmatter key are preserved; a note already carrying the
+// computed status is written back byte-identically. A filesystem failure
+// on any note aborts the pass.
+func writeBackStatus(notes []*note.Note, inv *entrypoints.Inventory) error {
+	for _, n := range notes {
+		n.SetStatus(status.Compute(n, inv))
+		if err := n.Write(); err != nil {
+			return fmt.Errorf("arch-gen: write back status of %s: %w", n.Path(), err)
+		}
+	}
+	return nil
 }
 
 // archNotesDir is the conventional location of a repository's L2
