@@ -558,6 +558,258 @@ func Test_archgen_L4SymbolSynopsis(t *testing.T) {
 		"L4 must carry the variable's doc-comment synopsis")
 }
 
+// callTreeSection returns the body of the `## Call tree` section of an
+// L3 artifact — every line between the heading and the next `## ` (or
+// end of file). It is the subject of the call-tree shape assertions.
+func callTreeSection(t *testing.T, l3 string) []string {
+	t.Helper()
+	lines := strings.Split(l3, "\n")
+	var out []string
+	in := false
+	for _, ln := range lines {
+		if strings.HasPrefix(ln, "## Call tree") {
+			in = true
+			continue
+		}
+		if in && strings.HasPrefix(ln, "## ") {
+			break
+		}
+		if in {
+			out = append(out, ln)
+		}
+	}
+	require.True(t, in, "the L3 artifact must carry a `## Call tree` section")
+	return out
+}
+
+// treeBulletDepth returns the indentation depth of a call-tree bullet
+// line (`  - …` → 1, `    - …` → 2, …) and reports whether the line is a
+// bullet at all. Indentation is two spaces per level.
+func treeBulletDepth(ln string) (depth int, isBullet bool) {
+	spaces := 0
+	for spaces < len(ln) && ln[spaces] == ' ' {
+		spaces++
+	}
+	if spaces+1 >= len(ln) || ln[spaces] != '-' || ln[spaces+1] != ' ' {
+		return 0, false
+	}
+	if spaces%2 != 0 {
+		return 0, false
+	}
+	return spaces / 2, true
+}
+
+// Test_archgen_L3CallTreeIsIndentedTree: the L3 `## Call tree` section is
+// rendered as an indented nested list rooted at the functionality's
+// handler entry-points — not a flat alphabetical dump of every reachable
+// function.
+func Test_archgen_L3CallTreeIsIndentedTree(t *testing.T) {
+	root := runGen(t, archtest.SpecGenCallTree())
+	l3 := readGenerated(t, root, "l3-network-lifecycle.md")
+
+	section := callTreeSection(t, l3)
+
+	// A flat list has every bullet at depth 0; a tree has indented
+	// descendants. At least one bullet must be indented below the root.
+	var sawRoot, sawNested bool
+	for _, ln := range section {
+		d, ok := treeBulletDepth(ln)
+		if !ok {
+			continue
+		}
+		if d == 0 {
+			sawRoot = true
+		}
+		if d > 0 {
+			sawNested = true
+		}
+	}
+	require.True(t, sawRoot, "the call-tree must carry a depth-0 root bullet")
+	require.True(t, sawNested,
+		"the call-tree must be an indented tree — at least one callee "+
+			"bullet must sit below its caller; got a flat list:\n%s",
+		strings.Join(section, "\n"))
+
+	// The root bullet is the handler entry-point Create, and step1 sits
+	// one indent below it (Create -> step1).
+	var createDepth = -1
+	var step1Depth = -1
+	for _, ln := range section {
+		d, ok := treeBulletDepth(ln)
+		if !ok {
+			continue
+		}
+		if strings.Contains(ln, ".Create") && createDepth < 0 {
+			createDepth = d
+		}
+		if strings.Contains(ln, ".step1") && step1Depth < 0 {
+			step1Depth = d
+		}
+	}
+	require.Equal(t, 0, createDepth, "Create must be the depth-0 tree root")
+	require.Equal(t, 1, step1Depth, "step1 must be one indent below Create")
+}
+
+// Test_archgen_L3CallTreeDepthCapped: the L3 call-tree never renders
+// deeper than four levels (root + 3). step4 — depth 5 from the Create
+// root — is dropped from the document even though it stays in the flat
+// reachable-set.
+func Test_archgen_L3CallTreeDepthCapped(t *testing.T) {
+	root := runGen(t, archtest.SpecGenCallTree())
+	l3 := readGenerated(t, root, "l3-network-lifecycle.md")
+
+	section := callTreeSection(t, l3)
+
+	maxDepth := 0
+	for _, ln := range section {
+		d, ok := treeBulletDepth(ln)
+		if !ok {
+			continue
+		}
+		if d > maxDepth {
+			maxDepth = d
+		}
+	}
+	require.LessOrEqual(t, maxDepth, 3,
+		"the call-tree must be capped at four levels (root + 3 = max "+
+			"indent depth 3); got depth %d:\n%s", maxDepth,
+		strings.Join(section, "\n"))
+
+	// step4 sits at depth 5 (Create>step1>step2>step3>step4) — beyond the
+	// cap, so it must not be rendered at all.
+	require.NotContains(t, strings.Join(section, "\n"), ".step4",
+		"step4 is beyond the four-level cap and must not appear in the tree")
+}
+
+// Test_archgen_L3CallTreeNoDuplicates: every function appears in the L3
+// call-tree exactly once — at its shallowest occurrence. `shared` is
+// called both directly by Create (depth 1) and by step2 (depth 3); it
+// must be rendered once.
+func Test_archgen_L3CallTreeNoDuplicates(t *testing.T) {
+	root := runGen(t, archtest.SpecGenCallTree())
+	l3 := readGenerated(t, root, "l3-network-lifecycle.md")
+
+	section := callTreeSection(t, l3)
+
+	counts := map[string]int{}
+	for _, ln := range section {
+		if _, ok := treeBulletDepth(ln); !ok {
+			continue
+		}
+		// The symbol is the back-quoted token of the bullet.
+		i := strings.IndexByte(ln, '`')
+		if i < 0 {
+			continue
+		}
+		j := strings.IndexByte(ln[i+1:], '`')
+		if j < 0 {
+			continue
+		}
+		sym := ln[i+1 : i+1+j]
+		counts[sym]++
+	}
+	for sym, n := range counts {
+		require.Equal(t, 1, n,
+			"call-tree function %q must be rendered exactly once; got %d",
+			sym, n)
+	}
+	require.Equal(t, 1, counts[symbolOf(section, ".shared")],
+		"the re-converging `shared` must be listed exactly once")
+}
+
+// symbolOf returns the first back-quoted symbol of the first call-tree
+// bullet whose symbol contains needle — a diagnostic helper.
+func symbolOf(section []string, needle string) string {
+	for _, ln := range section {
+		i := strings.IndexByte(ln, '`')
+		if i < 0 {
+			continue
+		}
+		j := strings.IndexByte(ln[i+1:], '`')
+		if j < 0 {
+			continue
+		}
+		sym := ln[i+1 : i+1+j]
+		if strings.Contains(sym, needle) {
+			return sym
+		}
+	}
+	return ""
+}
+
+// Test_archgen_L3CallTreeNodesCarrySynopsis: every node of the indented
+// call-tree carries its function's doc-comment synopsis, joined by " — ".
+func Test_archgen_L3CallTreeNodesCarrySynopsis(t *testing.T) {
+	root := runGen(t, archtest.SpecGenCallTree())
+	l3 := readGenerated(t, root, "l3-network-lifecycle.md")
+
+	section := callTreeSection(t, l3)
+	for _, ln := range section {
+		if _, ok := treeBulletDepth(ln); !ok {
+			continue
+		}
+		require.Contains(t, ln, "` — ",
+			"every call-tree node must separate symbol from synopsis: %q", ln)
+	}
+	require.Contains(t, strings.Join(section, "\n"),
+		"Create handles the Create RPC.",
+		"a call-tree node must carry its doc-comment synopsis")
+}
+
+// Test_archgen_L3CallTreeStable: a second arch-gen run over byte-identical
+// code reproduces the call-tree byte-for-byte — the tree's node order is
+// deterministic.
+func Test_archgen_L3CallTreeStable(t *testing.T) {
+	root := archtest.BuildRepo(t, archtest.SpecGenCallTree())
+	pkgs, inv, g, notes := genInputs(t, root)
+
+	require.NoError(t, gen.Generate(root, pkgs, inv, g, notes), "first run")
+	before := readGenerated(t, root, "l3-network-lifecycle.md")
+
+	require.NoError(t, gen.Generate(root, pkgs, inv, g, notes), "second run")
+	after := readGenerated(t, root, "l3-network-lifecycle.md")
+
+	require.Equal(t, before, after,
+		"the call-tree must be byte-stable across runs")
+}
+
+// Test_archgen_L3CarriesWikilinks: the L3 artifact carries an Obsidian
+// navigation line right under its heading, wikilinking the curated L2
+// note and the per-repo L4 artifact by base name. The L2 wikilink
+// targets the note's own base name — the curated L2 note an orchestrator
+// names `l2-<slug>.md` on a real repo and `network-lifecycle.md` in this
+// fixture.
+func Test_archgen_L3CarriesWikilinks(t *testing.T) {
+	root := runGen(t, archtest.SpecGenBasic())
+	l3 := readGenerated(t, root, "l3-network-lifecycle.md")
+
+	require.Contains(t, l3, "[[network-lifecycle]]",
+		"the L3 artifact must wikilink its curated L2 note by base name")
+	require.Contains(t, l3, "[[l4-genbasic]]",
+		"the L3 artifact must wikilink the per-repo L4 artifact")
+
+	// The navigation line sits in the artifact head, before `## Anchors`.
+	navIdx := strings.Index(l3, "[[network-lifecycle]]")
+	anchorsIdx := strings.Index(l3, "## Anchors")
+	require.GreaterOrEqual(t, navIdx, 0)
+	require.GreaterOrEqual(t, anchorsIdx, 0)
+	require.Less(t, navIdx, anchorsIdx,
+		"the navigation wikilinks must precede the `## Anchors` section")
+}
+
+// Test_archgen_L4CarriesFunctionalityWikilinks: the L4 artifact carries a
+// `## Функциональности` section wikilinking every L3 functionality
+// artifact of the repository by base name.
+func Test_archgen_L4CarriesFunctionalityWikilinks(t *testing.T) {
+	root := runGen(t, archtest.SpecGenBasic())
+	l4 := readGenerated(t, root, "l4-genbasic.md")
+
+	require.Contains(t, l4, "## Функциональности",
+		"the L4 artifact must carry a Функциональности section")
+	require.Contains(t, l4, "[[l3-network-lifecycle]]",
+		"the L4 Функциональности section must wikilink the L3 artifact")
+}
+
 // snapshotGenerated records the content of every .md file under
 // docs/arch/generated/, keyed by base name.
 func snapshotGenerated(t *testing.T, root string) map[string]string {

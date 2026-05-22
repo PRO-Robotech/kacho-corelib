@@ -17,14 +17,17 @@
 // # L3 — one artifact per L2 functionality note
 //
 // For every L2 note with a non-empty anchors list, Generate writes one
-// docs/arch/generated/l3-<note-slug>.md. Its content is the union of the
-// reachable-sets of the note's anchors:
+// docs/arch/generated/l3-<note-slug>.md. It opens with an Obsidian
+// navigation line wikilinking the curated L2 note and the per-repo L4
+// artifact, and its body is derived from the reachable-sets of the
+// note's anchors:
 //
-//   - the call-tree — the deterministically sorted canonical names of
-//     every function reachable from the functionality's entry-points,
-//     each annotated with the synopsis of its Go doc-comment (the
-//     "what it does"), or the C4-cross-referencing placeholder when it
-//     carries no doc-comment;
+//   - the call-tree — the call-graph reachable from the functionality's
+//     handler entry-points, laid out as an indented Markdown tree
+//     (root plus up to three descendant levels), every node listed once
+//     at its shallowest depth under its real caller and annotated with
+//     the synopsis of its Go doc-comment (the "what it does"), or the
+//     C4-cross-referencing placeholder when it carries no doc-comment;
 //   - the exported signatures — for every reachable function that is an
 //     exported function or method of *this* repository, its Go
 //     signature as written in source.
@@ -35,10 +38,12 @@
 // # L4 — one artifact per repository
 //
 // Generate writes a single docs/arch/generated/l4-<repo>.md tabulating
-// the application's domain surface: every exported type of the
-// repository's own packages (with its exported struct fields), every
-// exported package-level variable and every exported package-level
-// constant — each carrying its doc-comment synopsis. L4 additionally
+// the application's domain surface: a Функциональности section
+// wikilinking every L3 functionality artifact of the repository, then
+// every exported type of the repository's own packages (with its
+// exported struct fields), every exported package-level variable and
+// every exported package-level constant — each carrying its doc-comment
+// synopsis. L4 additionally
 // renders the structural links archgraph recovers from the code: a
 // type / variable / constant is linked to the repo functions that
 // reference it (use-def for a var/const, signature usage for a type),
@@ -174,6 +179,11 @@ func Generate(
 	// the input to stale-removal.
 	artifacts := map[string]struct{}{}
 
+	// repo — the human-facing repository name, used both in the L4
+	// artifact name/heading and in every L3 artifact's navigation
+	// wikilink to its per-repo L4 artifact.
+	repo := repoName(repoRoot, pkgs)
+
 	// L3 — one artifact per anchored L2 functionality note.
 	for _, n := range notes {
 		if len(n.Anchors) == 0 {
@@ -181,7 +191,7 @@ func Generate(
 			continue
 		}
 		base := l3FileName(n)
-		content := renderL3(n, g, exported, names, repoPkgs, rpcContract,
+		content := renderL3(n, repo, g, exported, names, repoPkgs, rpcContract,
 			contractResolved, synopsisBySSA)
 		if err := writeArtifact(outDir, base, content); err != nil {
 			return err
@@ -190,11 +200,10 @@ func Generate(
 	}
 
 	// L4 — a single per-repository domain-surface artifact.
-	repo := repoName(repoRoot, pkgs)
 	l4Base := "l4-" + repo + ".md"
 	surface := collectDomainSurface(repoRoot, pkgs, symUsers)
 	if err := writeArtifact(outDir, l4Base,
-		renderL4(repo, surface, funcFunctionality)); err != nil {
+		renderL4(repo, surface, funcFunctionality, notes)); err != nil {
 		return err
 	}
 	artifacts[l4Base] = struct{}{}
@@ -241,6 +250,7 @@ func l3FileName(n *note.Note) string {
 // is scoped.
 func renderL3(
 	n *note.Note,
+	repo string,
 	g *reach.Graph,
 	exported map[string]exportedFunc,
 	names map[*ast.FuncDecl]string,
@@ -251,7 +261,18 @@ func renderL3(
 ) string {
 	var b strings.Builder
 	b.WriteString(genMarker + "\n\n")
-	fmt.Fprintf(&b, "# L3 — %s\n\n", strings.TrimSuffix(filepath.Base(n.Path()), ".md"))
+	slug := strings.TrimSuffix(filepath.Base(n.Path()), ".md")
+	fmt.Fprintf(&b, "# L3 — %s\n\n", slug)
+
+	// Obsidian navigation line — wikilinks the curated L2 functionality
+	// note (by its own base name; an orchestrator names a real one
+	// `l2-<slug>.md`) and the per-repo L4 domain-surface artifact. Both
+	// links are by base name only: Obsidian resolves a wikilink globally
+	// by note name, so no path is needed and the line is checkout- and
+	// location-independent.
+	fmt.Fprintf(&b, "> Функциональность: [[%s]] · Переменные: [[l4-%s]]\n\n",
+		slug, repo)
+
 	fmt.Fprintf(&b, "Generated from L2 note `%s`.\n\n", filepath.Base(n.Path()))
 
 	// Anchors — the functionality's entry-points, sorted.
@@ -268,29 +289,26 @@ func renderL3(
 	// contract and never appear here.
 	renderRPCContract(&b, n, rpcContract, contractResolved)
 
-	// Call-tree — the union of the reachable-sets of every anchor, scoped
-	// to functions defined in this repository (stdlib and dependency
-	// functions RTA descended into are dropped from the document). Each
-	// function is annotated with the synopsis of its Go doc-comment — the
-	// "what it does" — recovered from synopsisBySSA; a function with no
-	// doc-comment carries the C4-cross-referencing placeholder. The
-	// bullet keeps the `- ` `<symbol>` ` prefix so the call-tree's
-	// repo-scoping regression scan stays valid.
-	funcs := reachableFuncs(n, g, repoPkgs)
+	// Call-tree — the call-graph reachable from the functionality's
+	// handler entry-points, laid out as an indented tree (root + up to
+	// three descendant levels) instead of a flat alphabetical dump.
+	// Scoped to functions defined in this repository (stdlib and
+	// dependency functions RTA descended into are dropped from the
+	// document). Each node is annotated with the synopsis of its Go
+	// doc-comment — the "what it does" — recovered from synopsisBySSA; a
+	// function with no doc-comment carries the C4-cross-referencing
+	// placeholder. Every bullet keeps the `- ` `<symbol>` ` shape so the
+	// call-tree's repo-scoping regression scan stays valid.
 	b.WriteString("## Call tree\n\n")
-	if len(funcs) == 0 {
-		b.WriteString("_No reachable functions._\n\n")
-	} else {
-		for _, f := range funcs {
-			fmt.Fprintf(&b, "- `%s` — %s\n", f, callTreeSynopsis(f, synopsisBySSA))
-		}
-		b.WriteString("\n")
-	}
+	b.WriteString(renderCallTree(n, g, repoPkgs, synopsisBySSA))
 
 	// Exported signatures — the reachable functions that are exported
 	// symbols of this repository, rendered as their source signature.
+	// reachableFuncs is the flat repo-scoped reachable-set: the call-tree
+	// depth-cap could hide a deep node, but its signature must still be
+	// documented, so the signature table is derived from the full set.
 	b.WriteString("## Exported signatures\n\n")
-	sigs := reachableExportedSignatures(funcs, exported, names)
+	sigs := reachableExportedSignatures(reachableFuncs(n, g, repoPkgs), exported, names)
 	if len(sigs) == 0 {
 		b.WriteString("_No exported functions reachable._\n")
 	} else {
@@ -467,6 +485,157 @@ func reachableFuncs(n *note.Note, g *reach.Graph, repoPkgs map[string]struct{}) 
 		}
 	}
 	return sortedKeys(set)
+}
+
+// callTreeMaxDepth caps the L3 call-tree at four levels — the root and
+// three descendant generations. A deeper call chain is not unrolled
+// into the document: a reader navigates it through the L3 artifacts of
+// the deeper functions, and an uncapped tree would reproduce the flat
+// reachable-set's unreadable size. A node beyond the cap is still in
+// the flat reachable-set (and thus in the Exported signatures table and
+// C2's dead-code union); only the *tree* is bounded.
+const callTreeMaxDepth = 4
+
+// renderCallTree renders the `## Call tree` section body of an L3
+// artifact: the call-graph reachable from the functionality's handler
+// entry-points, laid out as an indented Markdown list (two spaces per
+// level) rooted at those entry-points and capped at callTreeMaxDepth
+// levels.
+//
+// The tree is built by a breadth-first walk of the merged adjacency of
+// every anchor's reachable-set (reach.ReachableSet.Callees). BFS visits
+// a function at its *shallowest* reachable depth first; a function is
+// emitted exactly once, under the caller through which it was first
+// reached, so a re-converging call-graph never duplicates a subtree.
+// The walk is scoped to repository-owned functions: a stdlib or
+// dependency callee is skipped, as is its subtree.
+//
+// Node order at every level is deterministic — roots sorted by SSA
+// name, children sorted by SSA name — so the section is byte-stable
+// across runs (the git-diff drift gate D2 depends on it).
+func renderCallTree(
+	n *note.Note,
+	g *reach.Graph,
+	repoPkgs map[string]struct{},
+	synopsisBySSA map[string]repoFunc,
+) string {
+	roots, callees := callTreeGraph(n, g, repoPkgs)
+	if len(roots) == 0 {
+		return "_No reachable functions._\n\n"
+	}
+
+	// Phase 1 — a breadth-first walk assigns every reachable repo
+	// function its shallowest depth and the caller it is first reached
+	// through (its tree parent). BFS dequeue order guarantees the first
+	// time a function is seen is at its minimum depth; children of one
+	// caller are recorded against that caller, so the tree edge is the
+	// real call edge — not whichever node happened to render before it.
+	//
+	// children maps a caller to the ordered list of functions whose tree
+	// parent it is; depthOf records each placed function's depth.
+	children := map[string][]string{}
+	depthOf := map[string]int{}
+	placed := map[string]struct{}{}
+
+	type qItem struct {
+		fn    string
+		depth int
+	}
+	queue := make([]qItem, 0, len(roots))
+	for _, r := range roots {
+		if _, dup := placed[r]; dup {
+			continue
+		}
+		placed[r] = struct{}{}
+		depthOf[r] = 0
+		queue = append(queue, qItem{fn: r, depth: 0})
+	}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur.depth+1 >= callTreeMaxDepth {
+			// A node at the last rendered level has no rendered children.
+			continue
+		}
+		for _, callee := range callees[cur.fn] {
+			if !isRepoFunc(callee, repoPkgs) {
+				continue
+			}
+			if _, dup := placed[callee]; dup {
+				continue
+			}
+			placed[callee] = struct{}{}
+			depthOf[callee] = cur.depth + 1
+			children[cur.fn] = append(children[cur.fn], callee)
+			queue = append(queue, qItem{fn: callee, depth: cur.depth + 1})
+		}
+	}
+
+	// Phase 2 — a pre-order depth-first walk renders the parent → child
+	// tree built in phase 1, so a node always prints directly under its
+	// real caller at the correct indentation. Children are sorted at
+	// every level for a byte-stable artifact.
+	var b strings.Builder
+	var emit func(fn string)
+	emit = func(fn string) {
+		indent := strings.Repeat("  ", depthOf[fn])
+		fmt.Fprintf(&b, "%s- `%s` — %s\n",
+			indent, fn, callTreeSynopsis(fn, synopsisBySSA))
+		kids := append([]string(nil), children[fn]...)
+		sort.Strings(kids)
+		for _, k := range kids {
+			emit(k)
+		}
+	}
+	for _, r := range roots {
+		emit(r)
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+// callTreeGraph returns the inputs renderCallTree's BFS walks: the
+// sorted repo-owned entry-point roots of note n, and the merged
+// call-graph adjacency (caller → sorted callees) of every anchor's
+// reachable-set.
+//
+// An anchor whose symbol is not a key of g.Sets (a stale anchor — C1's
+// concern) contributes nothing. An anchor whose recorded Root is not a
+// repository function — e.g. a synthetic gRPC stub method — is dropped
+// from the root set; the reachable repo functions it leads to are still
+// reachable through the merged adjacency from another root, or, if not,
+// legitimately absent from this functionality's tree.
+func callTreeGraph(
+	n *note.Note,
+	g *reach.Graph,
+	repoPkgs map[string]struct{},
+) (roots []string, callees map[string][]string) {
+	rootSet := map[string]struct{}{}
+	merged := map[string]map[string]struct{}{}
+	if g != nil {
+		for _, sym := range anchorSymbols(n) {
+			rs, ok := g.Sets[sym]
+			if !ok {
+				continue
+			}
+			if rs.Root != "" && isRepoFunc(rs.Root, repoPkgs) {
+				rootSet[rs.Root] = struct{}{}
+			}
+			for caller, cs := range rs.Callees {
+				if merged[caller] == nil {
+					merged[caller] = map[string]struct{}{}
+				}
+				for _, c := range cs {
+					merged[caller][c] = struct{}{}
+				}
+			}
+		}
+	}
+	callees = make(map[string][]string, len(merged))
+	for caller, set := range merged {
+		callees[caller] = sortedKeys(set)
+	}
+	return sortedKeys(rootSet), callees
 }
 
 // callTreeSynopsis returns the doc-comment synopsis an L3 call-tree

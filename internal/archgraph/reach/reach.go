@@ -40,11 +40,13 @@
 //
 // # Determinism
 //
-// Every exported slice (ReachableSet.Funcs, ReachableSet.Files) is
-// sorted by symbol / path name, never left in call-graph traversal or
-// map-iteration order. Two Compute runs over byte-identical source
-// therefore yield byte-identical reachable-sets — the property Task 7
-// (freshness hashing) and Task 8 (call-tree generation) depend on.
+// Every exported slice (ReachableSet.Funcs, ReachableSet.Files, and
+// every callee list of ReachableSet.Callees) is sorted by symbol / path
+// name, never left in call-graph traversal or map-iteration order;
+// ReachableSet.Root is the single canonical SSA name the set was walked
+// from. Two Compute runs over byte-identical source therefore yield
+// byte-identical reachable-sets — the property Task 7 (freshness
+// hashing) and Task 8 (call-tree generation) depend on.
 //
 // This package depends only on the standard library,
 // golang.org/x/tools/go/{packages,ssa,ssa/ssautil,callgraph,
@@ -98,6 +100,19 @@ type ReachableSet struct {
 	// (compiler-generated wrappers, with no source position) contribute
 	// no file.
 	Files []string
+	// Root is the canonical SSA name of the function the set was BFS'd
+	// from — the entry-point's handler method, a main, or a kept root.
+	// It is the natural root of an L3 call-tree. Root is empty for the
+	// union of several sets (Union), which has no single origin.
+	Root string
+	// Callees maps each reachable function's canonical SSA name to the
+	// sorted, de-duplicated canonical names of the functions it directly
+	// calls — the adjacency of the call-graph, restricted to the
+	// reachable-set. It is the edge data an L3 call-tree renderer walks
+	// to lay the reachable-set out as an indented tree instead of a flat
+	// list. A function with no recorded out-edges is absent from the map.
+	// Callees is nil for the union of several sets (Union).
+	Callees map[string][]string
 }
 
 // Graph is the reachability result for a repository: one ReachableSet
@@ -298,12 +313,20 @@ func ComputeWithSymbols(
 }
 
 // reachableFrom walks cg breadth-first from the node of root and returns
-// the deterministically sorted set of reachable functions and their
-// source files. root itself is included. A root with no node in the
-// graph (RTA found it unreachable and pruned it) yields a singleton set
-// of root alone.
+// the deterministically sorted set of reachable functions, their source
+// files and the call-graph adjacency restricted to that set. root itself
+// is included, and its canonical name is recorded as the set's Root. A
+// root with no node in the graph (RTA found it unreachable and pruned it)
+// yields a singleton set of root alone.
 func reachableFrom(cg *callgraph.Graph, root *ssa.Function) ReachableSet {
 	visited := map[*ssa.Function]struct{}{root: {}}
+
+	// edges accumulates the direct out-edges of every visited node,
+	// keyed by caller SSA name and de-duplicated per caller. The
+	// adjacency is restricted to the reachable-set: every callee a node
+	// names is itself reachable (BFS enqueues it), so no edge can point
+	// outside the set.
+	edges := map[string]map[string]struct{}{}
 
 	start := cg.Nodes[root]
 	if start != nil {
@@ -311,13 +334,26 @@ func reachableFrom(cg *callgraph.Graph, root *ssa.Function) ReachableSet {
 		for len(queue) > 0 {
 			n := queue[0]
 			queue = queue[1:]
+			caller := n.Func.String()
 			// n.Out is an unordered set; iteration order does not affect
-			// the final result because the visited set is unordered and
-			// the output is sorted below.
+			// the final result because the edge sets and visited set are
+			// unordered maps and every output is sorted below.
 			for _, e := range n.Out {
 				callee := e.Callee
 				if callee == nil || callee.Func == nil {
 					continue
+				}
+				calleeName := callee.Func.String()
+				// Record the edge — including a self-edge and a re-entry to
+				// an already-visited node — so the call-tree renderer sees
+				// the full adjacency. A function never edges to itself in a
+				// meaningful tree, but recording it is harmless: the tree
+				// walk has its own once-only visited guard.
+				if caller != calleeName {
+					if edges[caller] == nil {
+						edges[caller] = map[string]struct{}{}
+					}
+					edges[caller][calleeName] = struct{}{}
 				}
 				if _, seen := visited[callee.Func]; seen {
 					continue
@@ -336,7 +372,17 @@ func reachableFrom(cg *callgraph.Graph, root *ssa.Function) ReachableSet {
 			files[f] = struct{}{}
 		}
 	}
-	return ReachableSet{Funcs: sortedKeys(funcs), Files: sortedKeys(files)}
+
+	callees := make(map[string][]string, len(edges))
+	for caller, set := range edges {
+		callees[caller] = sortedKeys(set)
+	}
+	return ReachableSet{
+		Funcs:   sortedKeys(funcs),
+		Files:   sortedKeys(files),
+		Root:    root.String(),
+		Callees: callees,
+	}
 }
 
 // fileOf returns the absolute path of the source file declaring fn, or

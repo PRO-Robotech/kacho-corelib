@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"golang.org/x/tools/go/packages"
+
+	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/note"
 )
 
 // domainSurface is the L4 domain inventory of a repository: the exported
@@ -320,13 +322,19 @@ func valueUsersOf(pkg *packages.Package, ident *ast.Ident, su symbolUsers) []str
 }
 
 // renderL4 builds the Markdown body of the repository's L4 artifact: the
-// GENERATED-BY marker, a table of every exported type (with its
+// GENERATED-BY marker, an Obsidian wikilink index of the repository's L3
+// functionality artifacts, a table of every exported type (with its
 // synopsis, exported struct fields and type-user functions), a table of
 // every exported package-level variable and constant (with its
 // synopsis and the functions that use it) and the function →
 // functionality membership table. Every collection is pre-sorted, so
 // the output is byte-for-byte reproducible.
-func renderL4(repo string, s domainSurface, funcFunctionality []funcFunctionalityRow) string {
+func renderL4(
+	repo string,
+	s domainSurface,
+	funcFunctionality []funcFunctionalityRow,
+	notes []*note.Note,
+) string {
 	var b strings.Builder
 	b.WriteString(genMarker + "\n\n")
 	fmt.Fprintf(&b, "# L4 — %s domain surface\n\n", repo)
@@ -334,11 +342,40 @@ func renderL4(repo string, s domainSurface, funcFunctionality []funcFunctionalit
 		"types, fields, variables and constants — each with its doc-comment " +
 		"synopsis and its structural links to the code.\n\n")
 
+	renderL4Functionalities(&b, notes)
 	renderL4Types(&b, s.Types)
 	renderL4Values(&b, "Variables", s.Vars)
 	renderL4Values(&b, "Constants", s.Consts)
 	renderL4FuncFunctionality(&b, funcFunctionality)
 	return b.String()
+}
+
+// renderL4Functionalities writes the `## Функциональности` section: an
+// Obsidian wikilink to the L3 artifact of every anchored L2
+// functionality note of the repository. The L3 artifact of a note is
+// `l3-<note-base>.md` (l3FileName); the wikilink is by base name without
+// the .md extension, so Obsidian resolves it globally. A planned
+// functionality (no anchors, hence no L3 artifact) carries no link. The
+// links are sorted for a byte-stable section.
+func renderL4Functionalities(b *strings.Builder, notes []*note.Note) {
+	b.WriteString("## Функциональности\n\n")
+	links := make([]string, 0, len(notes))
+	for _, n := range notes {
+		if len(n.Anchors) == 0 {
+			continue
+		}
+		base := l3FileName(n) // "l3-<slug>.md"
+		links = append(links, strings.TrimSuffix(base, ".md"))
+	}
+	if len(links) == 0 {
+		b.WriteString("_No anchored functionalities._\n\n")
+		return
+	}
+	sort.Strings(links)
+	for _, l := range links {
+		fmt.Fprintf(b, "- [[%s]]\n", l)
+	}
+	b.WriteString("\n")
 }
 
 // renderL4Types writes the `## Types` section: one row per exported

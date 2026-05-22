@@ -533,6 +533,80 @@ func SpecGenEnrich() Spec {
 	return s
 }
 
+// genTreeHandler is the handler of the call-tree fixture: its Create RPC
+// reaches a deliberately deep and re-converging call chain so the L3
+// call-tree renderer can be exercised for indentation, depth-capping and
+// once-only deduplication:
+//
+//	Create
+//	  step1
+//	    step2
+//	      step3
+//	        step4   <- depth 5: capped, never rendered
+//	      shared    <- also called directly by Create (dedup)
+//	  shared
+//
+// step4 is reachable only under step3 (depth 5 from the root) so a
+// 4-level cap must drop it from the tree even though it stays in the
+// flat reachable-set. shared is called from two different depths; it
+// must appear exactly once, at its shallowest occurrence.
+const genTreeHandler = `// Package handler implements the NetworkService gRPC handler of the
+// call-tree arch-gen fixture.
+package handler
+
+// Handler implements pb.NetworkServiceServer.
+type Handler struct{}
+
+// New returns a fresh Handler.
+func New() *Handler { return &Handler{} }
+
+// Create handles the Create RPC. It is the rpc entry-point root.
+func (h *Handler) Create() {
+	h.step1()
+	h.shared()
+}
+
+// step1 is the first level of the deep call chain.
+func (h *Handler) step1() { h.step2() }
+
+// step2 is the second level of the deep call chain.
+func (h *Handler) step2() {
+	h.step3()
+	h.shared()
+}
+
+// step3 is the third level of the deep call chain.
+func (h *Handler) step3() { h.step4() }
+
+// step4 is the fourth level — depth 5 from the root, beyond the cap.
+func (h *Handler) step4() {}
+
+// shared is called from two different depths of the call chain.
+func (h *Handler) shared() {}
+`
+
+// SpecGenCallTree is the call-tree arch-gen fixture: a NetworkService
+// whose Create RPC reaches a deep, re-converging call chain. It lets the
+// call-tree tests assert the L3 `## Call tree` section renders as an
+// indented tree, caps recursion at four levels and lists every function
+// exactly once.
+func SpecGenCallTree() Spec {
+	s := grpcServiceBase("example.com/gentree", []string{"Create"})
+	s.Notes = []NoteSpec{{
+		File: "network-lifecycle.md", Repo: "gentree",
+		RPCAnchors: []string{"kacho.cloud.vpc.v1.NetworkService/Create"},
+		SourceSHA:  FreshSHA,
+		Body: "# Network lifecycle\n\n" +
+			"This curated L2 note anchors NetworkService/Create, whose handler\n" +
+			"reaches a deep call chain. arch-gen's L3 call-tree must render it\n" +
+			"as an indented, depth-capped, deduplicated tree.\n",
+	}}
+	s.Files = map[string]string{
+		"internal/handler/handler.go": genTreeHandler,
+	}
+	return s
+}
+
 // rehome rewrites every occurrence of an old module path segment with a new
 // one in fixture source. genHandlerSource imports "example.com/genbasic/…";
 // a fixture re-homed under a different module needs those import paths
