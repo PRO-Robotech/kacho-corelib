@@ -7,10 +7,12 @@
 //   - arch-audit — run blocking architecture checks.
 //
 // This package owns argument parsing, repository-root discovery, Go
-// package loading (fail-fast on compile errors) and exit-code policy.
-// The actual generation / audit logic is added by later tasks; for
-// now both subcommands are success stubs once package loading
-// succeeds.
+// package loading (fail-fast on compile errors), check orchestration
+// and exit-code policy. arch-audit runs the C1 completeness check over
+// the discovered entry-point inventory and the repository's L2 notes; a
+// C1 failure exits non-zero. arch-gen is still a no-op stub (a later
+// task). C2/C3 and the combined-verdict orchestration also arrive in
+// later tasks.
 //
 // Exit codes (stable contract):
 //
@@ -29,7 +31,9 @@ import (
 
 	"golang.org/x/tools/go/packages"
 
+	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/check"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/entrypoints"
+	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/note"
 )
 
 // Exit codes form part of archgraph's stable CLI contract.
@@ -37,7 +41,8 @@ const (
 	// ExitOK signals success.
 	ExitOK = 0
 	// ExitCheckFailed signals that an architecture check reported a
-	// failure (used by later tasks; the skeleton never returns it).
+	// failure — arch-audit returns it when C1 (or, in later tasks,
+	// C2/C3) finds a blocking deviation.
 	ExitCheckFailed = 1
 	// ExitStartupError signals a startup error: unknown subcommand,
 	// the working directory is not inside a Go module, or the
@@ -118,23 +123,64 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return ExitStartupError
 	}
 
-	// Skeleton stubs: package loading and entry-point discovery
-	// succeeded, so the subcommand is reported as a no-op success.
-	// Real generation / auditing over the inventory arrives in later
-	// tasks; for now the inventory size is surfaced for visibility.
 	switch sub {
 	case subGen:
+		// Generation is a later task; report a no-op success.
 		writeString(stdout, fmt.Sprintf(
 			"arch-gen: loaded repository %s (%d entry-points discovered, "+
 				"no documentation generated yet)\n",
 			repoRoot, len(inv.Entries)))
+		return ExitOK
 	case subAudit:
-		writeString(stdout, fmt.Sprintf(
-			"arch-audit: loaded repository %s (%d entry-points discovered, "+
-				"no checks run yet)\n",
-			repoRoot, len(inv.Entries)))
+		return runAudit(repoRoot, inv, stdout, stderr)
 	}
 	return ExitOK
+}
+
+// archNotesDir is the conventional location of a repository's L2
+// functionality notes, relative to its root.
+const archNotesDir = "docs/arch"
+
+// runAudit runs the blocking architecture checks over the discovered
+// inventory and returns the process exit code. At this stage only C1
+// (completeness) is wired; C2/C3 and the combined-verdict orchestration
+// arrive in later tasks. A C1 failure makes arch-audit exit non-zero.
+func runAudit(repoRoot string, inv *entrypoints.Inventory, stdout, stderr io.Writer) int {
+	notes, err := loadArchNotes(repoRoot)
+	if err != nil {
+		writeString(stderr, err.Error()+"\n")
+		return ExitStartupError
+	}
+
+	res := check.CheckC1(inv, notes)
+
+	// Summary first, then each finding, then any advisory hints — a
+	// deterministic, CI-assertable layout.
+	writeString(stdout, res.Summary+"\n")
+	for _, f := range res.Findings {
+		writeString(stdout, "  "+f.String()+"\n")
+	}
+	for _, h := range res.Hints {
+		writeString(stdout, "  "+h+"\n")
+	}
+
+	if !res.Passed {
+		return ExitCheckFailed
+	}
+	return ExitOK
+}
+
+// loadArchNotes loads the L2 functionality notes under repoRoot's
+// docs/arch directory. A repository with no docs/arch directory simply
+// has no notes — that is not an error here (C1 will then report every
+// entry-point as undocumented). A malformed note is a hard error.
+func loadArchNotes(repoRoot string) ([]*note.Note, error) {
+	dir := filepath.Join(repoRoot, archNotesDir)
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return nil, nil
+	}
+	return note.Load(dir)
 }
 
 // writeString writes s to w. A failure to write to the process's

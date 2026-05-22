@@ -241,3 +241,80 @@ func Test_4_0_A5_CompileErrorFailFast(t *testing.T) {
 		})
 	}
 }
+
+// Test_4_0_E1_C1PassExitZero: arch-audit on a repo whose every
+// entry-point is anchored exactly once prints the C1 PASS summary and
+// exits 0.
+func Test_4_0_E1_C1PassExitZero(t *testing.T) {
+	res := run(t, fixture(t, "c1-e1"), "arch-audit")
+	require.Equal(t, 0, res.exitCode,
+		"a complete repo must pass C1; stderr=%s", res.stderr)
+	require.Contains(t, res.stdout,
+		"C1 completeness: PASS (3/3 entry-points anchored)")
+}
+
+// Test_4_0_E2_C1FailUndocumentedExitNonZero: an undocumented
+// entry-point makes arch-audit print the C1 FAIL summary plus the
+// undocumented-entry-point finding and exit non-zero.
+func Test_4_0_E2_C1FailUndocumentedExitNonZero(t *testing.T) {
+	res := run(t, fixture(t, "c1-e2"), "arch-audit")
+	require.NotEqual(t, 0, res.exitCode, "an undocumented entry-point must fail C1")
+	out := res.stdout + res.stderr
+	require.Contains(t, out, "C1 completeness: FAIL")
+	require.Contains(t, out,
+		"undocumented entry-point: kacho.cloud.vpc.v1.NetworkService/Update — "+
+			"declare it in an L2 note's anchors or remove it")
+}
+
+// Test_4_0_E3_C1FailStaleAnchorExitNonZero: a stale anchor makes
+// arch-audit print the C1 FAIL summary plus the stale-anchor finding
+// and exit non-zero.
+func Test_4_0_E3_C1FailStaleAnchorExitNonZero(t *testing.T) {
+	res := run(t, fixture(t, "c1-e3"), "arch-audit")
+	require.NotEqual(t, 0, res.exitCode, "a stale anchor must fail C1")
+	out := res.stdout + res.stderr
+	require.Contains(t, out, "C1 completeness: FAIL")
+	require.Contains(t, out,
+		"stale anchor: kacho.cloud.vpc.v1.NetworkService/Patch in "+
+			"docs/arch/network-lifecycle.md points to a non-existent entry-point")
+}
+
+// Test_4_0_E4_C1FailDuplicateAnchorExitNonZero: an entry-point anchored
+// in two notes makes arch-audit print the C1 FAIL summary plus the
+// duplicate finding (note names sorted) and exit non-zero.
+func Test_4_0_E4_C1FailDuplicateAnchorExitNonZero(t *testing.T) {
+	res := run(t, fixture(t, "c1-e4"), "arch-audit")
+	require.NotEqual(t, 0, res.exitCode, "a duplicate anchor must fail C1")
+	out := res.stdout + res.stderr
+	require.Contains(t, out, "C1 completeness: FAIL")
+	require.Contains(t, out,
+		"entry-point kacho.cloud.vpc.v1.NetworkService/Create anchored in 2 notes "+
+			"(network-bootstrap.md, network-lifecycle.md) — must be exactly one")
+}
+
+// Test_4_0_E5_C1NonConventionalWorkerHint: an anchored worker that was
+// not discovered as an entry-point reads as a stale anchor; arch-audit
+// fails C1 and also prints the convention-clarifying hint line.
+func Test_4_0_E5_C1NonConventionalWorkerHint(t *testing.T) {
+	res := run(t, fixture(t, "c1-e5"), "arch-audit")
+	require.NotEqual(t, 0, res.exitCode)
+	out := res.stdout + res.stderr
+	require.Contains(t, out, "C1 completeness: FAIL")
+	require.Contains(t, out,
+		"stale anchor: NetworkOutboxWorker in docs/arch/network-outbox.md "+
+			"points to a non-existent entry-point")
+	require.Contains(t, out,
+		"hint: an anchored worker NetworkOutboxWorker was not discovered as an "+
+			"entry-point — verify it follows the New<Name>+Run/Start convention")
+}
+
+// Test_4_0_E6_C1EmptyAnchorsIgnored: an L2 note with an empty anchors
+// list does not break C1 — arch-audit still passes and exits 0 when the
+// other notes cover every entry-point.
+func Test_4_0_E6_C1EmptyAnchorsIgnored(t *testing.T) {
+	res := run(t, fixture(t, "c1-e6"), "arch-audit")
+	require.Equal(t, 0, res.exitCode,
+		"an empty-anchors note must not fail C1; stderr=%s", res.stderr)
+	require.Contains(t, res.stdout,
+		"C1 completeness: PASS (2/2 entry-points anchored)")
+}
