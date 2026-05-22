@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/archtest"
 )
 
 // buildOnce builds the archgraph binary a single time for the whole
@@ -115,12 +117,11 @@ func asExit(err error, target **exec.ExitError) bool {
 	return ok
 }
 
-// fixture returns the absolute path to a testdata fixture directory.
-func fixture(t *testing.T, name string) string {
+// fixture builds a fixture Spec into a fresh temp module and returns the
+// absolute path to its module root, for invoking the CLI against.
+func fixture(t *testing.T, spec archtest.Spec) string {
 	t.Helper()
-	p, err := filepath.Abs(filepath.Join("testdata", name))
-	require.NoError(t, err)
-	return p
+	return archtest.BuildRepo(t, spec)
 }
 
 // snapshotTree records the relative paths of every file under root.
@@ -195,7 +196,7 @@ func Test_4_0_A2_UnknownSubcommand(t *testing.T) {
 // module with no --repo-root flag, archgraph detects the module via
 // go.mod and the subcommand succeeds.
 func Test_4_0_A3_RunFromRepoRoot(t *testing.T) {
-	repo := fixture(t, "validrepo")
+	repo := fixture(t, archtest.SpecValidRepo())
 
 	res := run(t, repo, "arch-audit")
 	require.Equal(t, 0, res.exitCode,
@@ -224,7 +225,7 @@ func Test_4_0_A4_RunOutsideGoModule(t *testing.T) {
 // compile causes both subcommands to fail fast with a load error
 // (naming the package and a position) and no false audit failures.
 func Test_4_0_A5_CompileErrorFailFast(t *testing.T) {
-	repo := fixture(t, "compileerror")
+	repo := fixture(t, archtest.SpecCompileError())
 
 	for _, sub := range []string{"arch-audit", "arch-gen"} {
 		sub := sub
@@ -246,7 +247,7 @@ func Test_4_0_A5_CompileErrorFailFast(t *testing.T) {
 // entry-point is anchored exactly once prints the C1 PASS summary and
 // exits 0.
 func Test_4_0_E1_C1PassExitZero(t *testing.T) {
-	res := run(t, fixture(t, "c1-e1"), "arch-audit")
+	res := run(t, fixture(t, archtest.SpecC1Pass()), "arch-audit")
 	require.Equal(t, 0, res.exitCode,
 		"a complete repo must pass C1; stderr=%s", res.stderr)
 	require.Contains(t, res.stdout,
@@ -257,7 +258,7 @@ func Test_4_0_E1_C1PassExitZero(t *testing.T) {
 // entry-point makes arch-audit print the C1 FAIL summary plus the
 // undocumented-entry-point finding and exit non-zero.
 func Test_4_0_E2_C1FailUndocumentedExitNonZero(t *testing.T) {
-	res := run(t, fixture(t, "c1-e2"), "arch-audit")
+	res := run(t, fixture(t, archtest.SpecC1Undocumented()), "arch-audit")
 	require.NotEqual(t, 0, res.exitCode, "an undocumented entry-point must fail C1")
 	out := res.stdout + res.stderr
 	require.Contains(t, out, "C1 completeness: FAIL")
@@ -270,7 +271,7 @@ func Test_4_0_E2_C1FailUndocumentedExitNonZero(t *testing.T) {
 // arch-audit print the C1 FAIL summary plus the stale-anchor finding
 // and exit non-zero.
 func Test_4_0_E3_C1FailStaleAnchorExitNonZero(t *testing.T) {
-	res := run(t, fixture(t, "c1-e3"), "arch-audit")
+	res := run(t, fixture(t, archtest.SpecC1StaleAnchor()), "arch-audit")
 	require.NotEqual(t, 0, res.exitCode, "a stale anchor must fail C1")
 	out := res.stdout + res.stderr
 	require.Contains(t, out, "C1 completeness: FAIL")
@@ -283,7 +284,7 @@ func Test_4_0_E3_C1FailStaleAnchorExitNonZero(t *testing.T) {
 // in two notes makes arch-audit print the C1 FAIL summary plus the
 // duplicate finding (note names sorted) and exit non-zero.
 func Test_4_0_E4_C1FailDuplicateAnchorExitNonZero(t *testing.T) {
-	res := run(t, fixture(t, "c1-e4"), "arch-audit")
+	res := run(t, fixture(t, archtest.SpecC1DuplicateAnchor()), "arch-audit")
 	require.NotEqual(t, 0, res.exitCode, "a duplicate anchor must fail C1")
 	out := res.stdout + res.stderr
 	require.Contains(t, out, "C1 completeness: FAIL")
@@ -296,7 +297,7 @@ func Test_4_0_E4_C1FailDuplicateAnchorExitNonZero(t *testing.T) {
 // not discovered as an entry-point reads as a stale anchor; arch-audit
 // fails C1 and also prints the convention-clarifying hint line.
 func Test_4_0_E5_C1NonConventionalWorkerHint(t *testing.T) {
-	res := run(t, fixture(t, "c1-e5"), "arch-audit")
+	res := run(t, fixture(t, archtest.SpecC1NonConventionalWorker()), "arch-audit")
 	require.NotEqual(t, 0, res.exitCode)
 	out := res.stdout + res.stderr
 	require.Contains(t, out, "C1 completeness: FAIL")
@@ -312,7 +313,7 @@ func Test_4_0_E5_C1NonConventionalWorkerHint(t *testing.T) {
 // list does not break C1 — arch-audit still passes and exits 0 when the
 // other notes cover every entry-point.
 func Test_4_0_E6_C1EmptyAnchorsIgnored(t *testing.T) {
-	res := run(t, fixture(t, "c1-e6"), "arch-audit")
+	res := run(t, fixture(t, archtest.SpecC1EmptyAnchors()), "arch-audit")
 	require.Equal(t, 0, res.exitCode,
 		"an empty-anchors note must not fail C1; stderr=%s", res.stderr)
 	require.Contains(t, res.stdout,
@@ -322,7 +323,7 @@ func Test_4_0_E6_C1EmptyAnchorsIgnored(t *testing.T) {
 // Test_4_0_F1_C2PassExitZero: arch-audit on a repo whose every exported
 // symbol is reachable prints the C2 PASS summary and exits 0.
 func Test_4_0_F1_C2PassExitZero(t *testing.T) {
-	res := run(t, fixture(t, "f1"), "arch-audit")
+	res := run(t, fixture(t, archtest.SpecC2Pass()), "arch-audit")
 	require.Equal(t, 0, res.exitCode,
 		"a repo with no dead code must pass C2; stderr=%s", res.stderr)
 	require.Contains(t, res.stdout,
@@ -333,7 +334,7 @@ func Test_4_0_F1_C2PassExitZero(t *testing.T) {
 // symbol makes arch-audit print the C2 FAIL summary plus the dead-code
 // finding (symbol + file:line) and exit non-zero.
 func Test_4_0_F2_C2FailUnreachableExitNonZero(t *testing.T) {
-	res := run(t, fixture(t, "f2"), "arch-audit")
+	res := run(t, fixture(t, archtest.SpecC2Unreachable()), "arch-audit")
 	require.NotEqual(t, 0, res.exitCode, "an unreachable exported symbol must fail")
 	out := res.stdout + res.stderr
 	require.Contains(t, out, "C2 dead-code: FAIL")
@@ -347,7 +348,7 @@ func Test_4_0_F2_C2FailUnreachableExitNonZero(t *testing.T) {
 // makes arch-audit print the kept-symbol line; C2 does not contribute a
 // non-zero exit.
 func Test_4_0_F3_C2KeepSuppresses(t *testing.T) {
-	res := run(t, fixture(t, "f3"), "arch-audit")
+	res := run(t, fixture(t, archtest.SpecC2Keep()), "arch-audit")
 	require.Equal(t, 0, res.exitCode,
 		"a kept symbol must not fail the audit; stderr=%s", res.stderr)
 	require.Contains(t, res.stdout, "C2 dead-code: PASS")
@@ -360,7 +361,7 @@ func Test_4_0_F3_C2KeepSuppresses(t *testing.T) {
 // with no reason makes arch-audit print the C2 FAIL summary plus the
 // invalid-annotation finding and exit non-zero.
 func Test_4_0_F4_C2KeepWithoutReasonRejected(t *testing.T) {
-	res := run(t, fixture(t, "f4"), "arch-audit")
+	res := run(t, fixture(t, archtest.SpecC2KeepBare()), "arch-audit")
 	require.NotEqual(t, 0, res.exitCode, "a bare archgraph:keep must fail")
 	out := res.stdout + res.stderr
 	require.Contains(t, out, "C2 dead-code: FAIL")
@@ -373,7 +374,7 @@ func Test_4_0_F4_C2KeepWithoutReasonRejected(t *testing.T) {
 // reachability root — arch-audit passes C2 because nothing transitively
 // reachable from the kept BuildClientSDK is reported as dead.
 func Test_4_0_F5_C2KeepIsTransitive(t *testing.T) {
-	res := run(t, fixture(t, "f5"), "arch-audit")
+	res := run(t, fixture(t, archtest.SpecC2KeepTransitive()), "arch-audit")
 	require.Equal(t, 0, res.exitCode,
 		"keep transitivity must keep C2 passing; stderr=%s", res.stderr)
 	require.Contains(t, res.stdout, "C2 dead-code: PASS")
@@ -382,13 +383,13 @@ func Test_4_0_F5_C2KeepIsTransitive(t *testing.T) {
 
 // Test_4_0_F6_C2ReflectionKeepContinuation: a reflection-only exported
 // method is reported dead by C2 (an expected RTA imprecision). The test
-// runs as a continuation: first arch-audit on a verbatim copy of the f6
-// fixture FAILS; after injecting `// archgraph:keep reflection-invoked`
-// above the method, a second arch-audit PASSES.
+// runs as a continuation: first arch-audit on a freshly built f6 fixture
+// FAILS; after injecting `// archgraph:keep reflection-invoked` above the
+// method, a second arch-audit PASSES.
 func Test_4_0_F6_C2ReflectionKeepContinuation(t *testing.T) {
-	// Work on a copy: testdata stays immutable.
-	work := t.TempDir()
-	copyTree(t, fixture(t, "f6"), work)
+	// The fixture is built into its own t.TempDir(), so phase 2 may
+	// mutate it in place — nothing checked into the repo is touched.
+	work := fixture(t, archtest.SpecC2Reflection())
 
 	// Phase 1 — before annotation: C2 fails on the reflection-only method.
 	before := run(t, work, "arch-audit")
@@ -421,33 +422,9 @@ func Test_4_0_F6_C2ReflectionKeepContinuation(t *testing.T) {
 // arch-audit print the C2 SKIP summary; C2 does not contribute to the
 // exit code while C1 still runs.
 func Test_4_0_F7_C2LibrarySkip(t *testing.T) {
-	res := run(t, fixture(t, "f7"), "arch-audit")
+	res := run(t, fixture(t, archtest.SpecC2Library()), "arch-audit")
 	require.Equal(t, 0, res.exitCode,
 		"a library repo must not fail the audit; stderr=%s", res.stderr)
 	require.Contains(t, res.stdout,
 		"C2 dead-code: SKIP (library repo: no main package)")
-}
-
-// copyTree recursively copies the directory tree rooted at src into dst.
-func copyTree(t *testing.T, src, dst string) {
-	t.Helper()
-	err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, rerr := filepath.Rel(src, path)
-		if rerr != nil {
-			return rerr
-		}
-		target := filepath.Join(dst, rel)
-		if info.IsDir() {
-			return os.MkdirAll(target, 0o755)
-		}
-		data, rerr := os.ReadFile(path)
-		if rerr != nil {
-			return rerr
-		}
-		return os.WriteFile(target, data, info.Mode().Perm())
-	})
-	require.NoError(t, err, "copying fixture tree")
 }

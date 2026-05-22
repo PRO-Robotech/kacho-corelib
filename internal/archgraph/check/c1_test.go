@@ -7,11 +7,11 @@ package check_test
 // anchor completeness). The scenario ID is encoded in the test name for
 // traceability.
 //
-// Tests load synthetic fixture repositories from cmd/archgraph/testdata
-// (a main package under cmd/<svc>/ plus L2 notes under docs/arch/) with
-// golang.org/x/tools/go/packages and note.Load, then assert on the
-// Result returned by check.CheckC1. No testcontainers, no network:
-// every fixture is self-contained and pins go 1.21.
+// Fixtures are synthesised by archtest.BuildRepo into t.TempDir() — a
+// main package under cmd/svc/ plus L2 notes under docs/arch/ — loaded
+// with golang.org/x/tools/go/packages and note.Load, then asserted on the
+// Result returned by check.CheckC1. No testcontainers, no network: every
+// fixture is self-contained and pins go 1.21.
 
 import (
 	"os"
@@ -22,28 +22,23 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/tools/go/packages"
 
+	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/archtest"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/check"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/entrypoints"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/note"
 )
 
-// fixtureRoot returns the absolute path to a C1 testdata fixture.
-func fixtureRoot(t *testing.T, name string) string {
+// buildFixture materialises spec into a fresh temp module and returns the
+// module root.
+func buildFixture(t *testing.T, spec archtest.Spec) string {
 	t.Helper()
-	root, err := filepath.Abs(filepath.Join(
-		"..", "..", "..", "cmd", "archgraph", "testdata", name))
-	require.NoError(t, err)
-	info, err := os.Stat(root)
-	require.NoError(t, err, "fixture %s must exist", name)
-	require.True(t, info.IsDir())
-	return root
+	return archtest.BuildRepo(t, spec)
 }
 
-// loadInventory loads the named fixture's packages and discovers its
+// loadInventoryAt loads the fixture rooted at root and discovers its
 // entry-point inventory.
-func loadInventory(t *testing.T, name string) *entrypoints.Inventory {
+func loadInventoryAt(t *testing.T, root string) *entrypoints.Inventory {
 	t.Helper()
-	root := fixtureRoot(t, name)
 	cfg := &packages.Config{
 		Mode: packages.NeedName |
 			packages.NeedFiles |
@@ -57,20 +52,20 @@ func loadInventory(t *testing.T, name string) *entrypoints.Inventory {
 		Env:   append(os.Environ(), "GOTOOLCHAIN=local"),
 	}
 	pkgs, err := packages.Load(cfg, "./...")
-	require.NoError(t, err, "loading fixture %s", name)
+	require.NoError(t, err, "loading fixture at %s", root)
 	for _, p := range pkgs {
-		require.Empty(t, p.Errors, "fixture %s package %s must compile", name, p.PkgPath)
+		require.Empty(t, p.Errors, "fixture at %s package %s must compile", root, p.PkgPath)
 	}
 	inv, err := entrypoints.Discover(pkgs)
-	require.NoError(t, err, "discovering entry-points of fixture %s", name)
+	require.NoError(t, err, "discovering entry-points of fixture at %s", root)
 	return inv
 }
 
-// loadNotes loads the L2 notes under the named fixture's docs/arch.
-func loadNotes(t *testing.T, name string) []*note.Note {
+// loadNotesAt loads the L2 notes under the fixture's docs/arch directory.
+func loadNotesAt(t *testing.T, root string) []*note.Note {
 	t.Helper()
-	notes, err := note.Load(filepath.Join(fixtureRoot(t, name), "docs", "arch"))
-	require.NoError(t, err, "loading L2 notes of fixture %s", name)
+	notes, err := note.Load(filepath.Join(root, "docs", "arch"))
+	require.NoError(t, err, "loading L2 notes of fixture at %s", root)
 	return notes
 }
 
@@ -88,8 +83,9 @@ func reasons(r check.Result) []string {
 // worker, FQN form) are each anchored by exactly one L2 note passes C1
 // with a 3/3 summary and produces no findings.
 func Test_4_0_E1_C1Pass(t *testing.T) {
-	inv := loadInventory(t, "c1-e1")
-	notes := loadNotes(t, "c1-e1")
+	root := buildFixture(t, archtest.SpecC1Pass())
+	inv := loadInventoryAt(t, root)
+	notes := loadNotesAt(t, root)
 
 	res := check.CheckC1(inv, notes)
 
@@ -103,8 +99,9 @@ func Test_4_0_E1_C1Pass(t *testing.T) {
 // the code but anchored by no L2 note fails C1 with an
 // "undocumented entry-point" finding.
 func Test_4_0_E2_C1FailUndocumentedEntryPoint(t *testing.T) {
-	inv := loadInventory(t, "c1-e2")
-	notes := loadNotes(t, "c1-e2")
+	root := buildFixture(t, archtest.SpecC1Undocumented())
+	inv := loadInventoryAt(t, root)
+	notes := loadNotesAt(t, root)
 
 	res := check.CheckC1(inv, notes)
 
@@ -119,8 +116,9 @@ func Test_4_0_E2_C1FailUndocumentedEntryPoint(t *testing.T) {
 // no longer exists in the code fails C1 with a "stale anchor" finding
 // that names the offending note.
 func Test_4_0_E3_C1FailStaleAnchor(t *testing.T) {
-	inv := loadInventory(t, "c1-e3")
-	notes := loadNotes(t, "c1-e3")
+	root := buildFixture(t, archtest.SpecC1StaleAnchor())
+	inv := loadInventoryAt(t, root)
+	notes := loadNotesAt(t, root)
 
 	res := check.CheckC1(inv, notes)
 
@@ -135,8 +133,9 @@ func Test_4_0_E3_C1FailStaleAnchor(t *testing.T) {
 // notes fails C1 with a "must be exactly one" finding listing both note
 // names in sorted order.
 func Test_4_0_E4_C1FailDuplicateAnchor(t *testing.T) {
-	inv := loadInventory(t, "c1-e4")
-	notes := loadNotes(t, "c1-e4")
+	root := buildFixture(t, archtest.SpecC1DuplicateAnchor())
+	inv := loadInventoryAt(t, root)
+	notes := loadNotesAt(t, root)
 
 	res := check.CheckC1(inv, notes)
 
@@ -152,8 +151,9 @@ func Test_4_0_E4_C1FailDuplicateAnchor(t *testing.T) {
 // reads as stale; because the inventory carries an unrecognised-worker
 // hint, C1 augments the output with a clarifying hint line.
 func Test_4_0_E5_C1NonConventionalWorkerHint(t *testing.T) {
-	inv := loadInventory(t, "c1-e5")
-	notes := loadNotes(t, "c1-e5")
+	root := buildFixture(t, archtest.SpecC1NonConventionalWorker())
+	inv := loadInventoryAt(t, root)
+	notes := loadNotesAt(t, root)
 	require.NotEmpty(t, inv.Hints, "fixture must carry an unrecognised-worker hint")
 
 	res := check.CheckC1(inv, notes)
@@ -173,8 +173,9 @@ func Test_4_0_E5_C1NonConventionalWorkerHint(t *testing.T) {
 // contributes coverage nor produces a stale finding — so C1 still
 // passes when every entry-point is anchored by the other notes.
 func Test_4_0_E6_C1EmptyAnchorsIgnored(t *testing.T) {
-	inv := loadInventory(t, "c1-e6")
-	notes := loadNotes(t, "c1-e6")
+	root := buildFixture(t, archtest.SpecC1EmptyAnchors())
+	inv := loadInventoryAt(t, root)
+	notes := loadNotesAt(t, root)
 
 	res := check.CheckC1(inv, notes)
 

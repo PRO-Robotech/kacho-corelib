@@ -7,9 +7,9 @@ package check_test
 // with the `// archgraph:keep` annotation). The scenario ID is encoded
 // in the test name for traceability.
 //
-// Tests load synthetic fixture repositories from cmd/archgraph/testdata
-// (f1..f7) with golang.org/x/tools/go/packages, run entry-point
-// discovery, then assert on the Result returned by check.CheckC2. No
+// Fixtures are synthesised by archtest.BuildRepo into t.TempDir(), loaded
+// with golang.org/x/tools/go/packages, run through entry-point discovery,
+// then asserted on the Result returned by check.CheckC2. No
 // testcontainers, no network: every fixture is self-contained and pins
 // go 1.21.
 
@@ -22,14 +22,14 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/tools/go/packages"
 
+	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/archtest"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/check"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/entrypoints"
 )
 
-// loadFixturePkgs loads every package of the named C2 fixture.
-func loadFixturePkgs(t *testing.T, name string) []*packages.Package {
+// loadFixturePkgsAt loads every package of the C2 fixture rooted at root.
+func loadFixturePkgsAt(t *testing.T, root string) []*packages.Package {
 	t.Helper()
-	root := fixtureRoot(t, name)
 	cfg := &packages.Config{
 		Mode: packages.NeedName |
 			packages.NeedFiles |
@@ -43,22 +43,22 @@ func loadFixturePkgs(t *testing.T, name string) []*packages.Package {
 		Env:   append(os.Environ(), "GOTOOLCHAIN=local"),
 	}
 	pkgs, err := packages.Load(cfg, "./...")
-	require.NoError(t, err, "loading fixture %s", name)
+	require.NoError(t, err, "loading fixture at %s", root)
 	for _, p := range pkgs {
-		require.Empty(t, p.Errors, "fixture %s package %s must compile", name, p.PkgPath)
+		require.Empty(t, p.Errors, "fixture at %s package %s must compile", root, p.PkgPath)
 	}
 	return pkgs
 }
 
-// runC2 loads a C2 fixture, discovers its inventory and runs CheckC2.
-func runC2(t *testing.T, name string) check.Result {
+// runC2 builds a C2 fixture, discovers its inventory and runs CheckC2.
+func runC2(t *testing.T, spec archtest.Spec) check.Result {
 	t.Helper()
-	root := fixtureRoot(t, name)
-	pkgs := loadFixturePkgs(t, name)
+	root := archtest.BuildRepo(t, spec)
+	pkgs := loadFixturePkgsAt(t, root)
 	inv, err := entrypoints.Discover(pkgs)
-	require.NoError(t, err, "discovering entry-points of fixture %s", name)
+	require.NoError(t, err, "discovering entry-points of fixture %s", spec.Module)
 	res, err := check.CheckC2(root, pkgs, inv)
-	require.NoError(t, err, "CheckC2 must not error on fixture %s", name)
+	require.NoError(t, err, "CheckC2 must not error on fixture %s", spec.Module)
 	return res
 }
 
@@ -85,7 +85,7 @@ func containsLine(ss []string, sub string) bool {
 // the repo is reachable from the single entry-point, so C2 passes with
 // no findings and a 0-unreachable summary.
 func Test_4_0_F1_C2_PassAllReachable(t *testing.T) {
-	res := runC2(t, "f1")
+	res := runC2(t, archtest.SpecC2Pass())
 
 	require.True(t, res.Passed,
 		"C2 must pass when every exported symbol is reachable; findings=%v",
@@ -99,7 +99,7 @@ func Test_4_0_F1_C2_PassAllReachable(t *testing.T) {
 // every entry-point and carrying no annotation fails C2 with a finding
 // naming the symbol and its file:line position.
 func Test_4_0_F2_C2_FailUnreachable(t *testing.T) {
-	res := runC2(t, "f2")
+	res := runC2(t, archtest.SpecC2Unreachable())
 
 	require.False(t, res.Passed, "an unreachable exported symbol must fail C2")
 	require.Contains(t, res.Summary, "C2 dead-code: FAIL")
@@ -114,7 +114,7 @@ func Test_4_0_F2_C2_FailUnreachable(t *testing.T) {
 // function annotated with `// archgraph:keep <reason>` is not reported
 // as dead; C2 passes and lists the symbol as kept with its reason.
 func Test_4_0_F3_C2_KeepSuppressesWithReason(t *testing.T) {
-	res := runC2(t, "f3")
+	res := runC2(t, archtest.SpecC2Keep())
 
 	require.True(t, res.Passed,
 		"a kept symbol must not fail C2; findings=%v", findingTexts(res))
@@ -131,7 +131,7 @@ func Test_4_0_F3_C2_KeepSuppressesWithReason(t *testing.T) {
 // with no reason over an unreachable exported symbol is rejected as an
 // invalid annotation; C2 fails with an invalid-annotation finding.
 func Test_4_0_F4_C2_KeepWithoutReasonRejected(t *testing.T) {
-	res := runC2(t, "f4")
+	res := runC2(t, archtest.SpecC2KeepBare())
 
 	require.False(t, res.Passed, "a bare archgraph:keep must fail C2")
 	require.Contains(t, res.Summary, "C2 dead-code: FAIL")
@@ -145,7 +145,7 @@ func Test_4_0_F4_C2_KeepWithoutReasonRejected(t *testing.T) {
 // reachability root — a private helper and a further exported function
 // transitively reachable from it are not reported as dead.
 func Test_4_0_F5_C2_KeepIsTransitive(t *testing.T) {
-	res := runC2(t, "f5")
+	res := runC2(t, archtest.SpecC2KeepTransitive())
 
 	require.True(t, res.Passed,
 		"keep must extend reachability transitively; findings=%v",
@@ -160,7 +160,7 @@ func Test_4_0_F5_C2_KeepIsTransitive(t *testing.T) {
 // summary, passes (does not contribute to a failing exit) and produces
 // no findings even though exported symbols are unused.
 func Test_4_0_F7_C2_LibraryRepoSkipped(t *testing.T) {
-	res := runC2(t, "f7")
+	res := runC2(t, archtest.SpecC2Library())
 
 	require.True(t, res.Passed, "a skipped C2 must not fail")
 	require.Empty(t, res.Findings, "a skipped C2 produces no findings")
@@ -172,7 +172,7 @@ func Test_4_0_F7_C2_LibraryRepoSkipped(t *testing.T) {
 // (as a continuation: FAIL before annotation, PASS after) by the CLI
 // test in cmd/archgraph; here we only assert the unit-level FAIL.
 func Test_4_0_F6_C2_ReflectionOnlyIsDead(t *testing.T) {
-	res := runC2(t, "f6")
+	res := runC2(t, archtest.SpecC2Reflection())
 
 	require.False(t, res.Passed,
 		"a reflection-only exported method is invisible to RTA and must "+

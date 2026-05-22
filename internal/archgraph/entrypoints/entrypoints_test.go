@@ -6,35 +6,31 @@ package entrypoints_test
 // sub-phase 4.0 acceptance document (archgraph entry-point inventory).
 // The scenario ID is encoded in the test name for traceability.
 //
-// Tests load synthetic fixture repositories from cmd/archgraph/testdata
-// with golang.org/x/tools/go/packages and assert on the Inventory
-// returned by Discover. No testcontainers, no network: every fixture is
-// self-contained and pins go 1.21 so it loads under GOTOOLCHAIN=local.
+// Fixtures are synthesised on the fly by archtest.BuildRepo into
+// t.TempDir() and loaded with golang.org/x/tools/go/packages; tests
+// assert on the Inventory returned by Discover. No testcontainers, no
+// network: every fixture is self-contained and pins go 1.21 so it loads
+// under GOTOOLCHAIN=local.
 
 import (
 	"go/types"
 	"os"
-	"path/filepath"
 	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/tools/go/packages"
 
+	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/archtest"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/entrypoints"
 )
 
-// loadFixture loads every package of the named testdata fixture and
-// returns them. The fixture is identified by its directory name under
-// cmd/archgraph/testdata.
-func loadFixture(t *testing.T, name string) []*packages.Package {
+// loadFixture builds the given fixture Spec into a fresh temp module and
+// loads every package, asserting the module compiles cleanly.
+func loadFixture(t *testing.T, spec archtest.Spec) []*packages.Package {
 	t.Helper()
 
-	root, err := filepath.Abs(filepath.Join("..", "..", "..", "cmd", "archgraph", "testdata", name))
-	require.NoError(t, err)
-	info, err := os.Stat(root)
-	require.NoError(t, err, "fixture %s must exist", name)
-	require.True(t, info.IsDir())
+	root := archtest.BuildRepo(t, spec)
 
 	cfg := &packages.Config{
 		Mode: packages.NeedName |
@@ -49,9 +45,9 @@ func loadFixture(t *testing.T, name string) []*packages.Package {
 		Env:   append(os.Environ(), "GOTOOLCHAIN=local"),
 	}
 	pkgs, err := packages.Load(cfg, "./...")
-	require.NoError(t, err, "loading fixture %s", name)
+	require.NoError(t, err, "loading fixture %s", spec.Module)
 	for _, p := range pkgs {
-		require.Empty(t, p.Errors, "fixture %s package %s must compile", name, p.PkgPath)
+		require.Empty(t, p.Errors, "fixture %s package %s must compile", spec.Module, p.PkgPath)
 	}
 	return pkgs
 }
@@ -73,7 +69,7 @@ func names(inv *entrypoints.Inventory, kind entrypoints.Kind) []string {
 // RegisterNetworkServiceServer call yields exactly the four FQN-named
 // rpc entry-points, each canonically "<proto-FQN>/<method>".
 func Test_4_0_B1_GRPCMethodsByRegister(t *testing.T) {
-	pkgs := loadFixture(t, "svc-grpc-basic")
+	pkgs := loadFixture(t, archtest.SpecGRPCBasic())
 
 	inv, err := entrypoints.Discover(pkgs)
 	require.NoError(t, err)
@@ -136,7 +132,7 @@ func receiverTypeName(fn *types.Func) string {
 // analysis — rooting at RegisterNetworkServiceServer would reach
 // registration plumbing instead of the handler's business logic.
 func Test_4_0_B1_RPCRootIsHandlerMethod(t *testing.T) {
-	pkgs := loadFixture(t, "svc-grpc-basic")
+	pkgs := loadFixture(t, archtest.SpecGRPCBasic())
 
 	inv, err := entrypoints.Discover(pkgs)
 	require.NoError(t, err)
@@ -156,7 +152,7 @@ func Test_4_0_B1_RPCRootIsHandlerMethod(t *testing.T) {
 // calls handing two distinct concrete handlers, each rpc entry-point's
 // Root resolves to a method of its own handler type.
 func Test_4_0_B2_RPCRootIsHandlerMethodMulti(t *testing.T) {
-	pkgs := loadFixture(t, "svc-grpc-multi")
+	pkgs := loadFixture(t, archtest.SpecGRPCMulti())
 
 	inv, err := entrypoints.Discover(pkgs)
 	require.NoError(t, err)
@@ -179,7 +175,7 @@ func Test_4_0_B2_RPCRootIsHandlerMethodMulti(t *testing.T) {
 // one main yield entry-points for both services, FQN-prefixed
 // independently, with no merge or loss.
 func Test_4_0_B2_MultipleRegisterInOneMain(t *testing.T) {
-	pkgs := loadFixture(t, "svc-grpc-multi")
+	pkgs := loadFixture(t, archtest.SpecGRPCMulti())
 
 	inv, err := entrypoints.Discover(pkgs)
 	require.NoError(t, err)
@@ -196,7 +192,7 @@ func Test_4_0_B2_MultipleRegisterInOneMain(t *testing.T) {
 // Test_4_0_B3_WorkerByConstructorConvention: New<Name>(...) + go
 // w.Run(ctx) is inventoried as a worker named after the worker type.
 func Test_4_0_B3_WorkerByConstructorConvention(t *testing.T) {
-	pkgs := loadFixture(t, "svc-worker")
+	pkgs := loadFixture(t, archtest.SpecWorker())
 
 	inv, err := entrypoints.Discover(pkgs)
 	require.NoError(t, err)
@@ -222,7 +218,7 @@ func Test_4_0_B3_WorkerByConstructorConvention(t *testing.T) {
 // inventoried as workers, each rooted at the method handed to the
 // goroutine.
 func Test_4_0_B4_ReconcilerAndCron(t *testing.T) {
-	pkgs := loadFixture(t, "svc-reconciler-cron")
+	pkgs := loadFixture(t, archtest.SpecReconcilerCron())
 
 	inv, err := entrypoints.Discover(pkgs)
 	require.NoError(t, err)
@@ -245,7 +241,7 @@ func Test_4_0_B4_ReconcilerAndCron(t *testing.T) {
 // without the New<Name> + Run/Start convention is NOT inventoried, but
 // a hint is collected pointing at the goroutine site.
 func Test_4_0_B5_NonConventionalWorkerNotRecognised(t *testing.T) {
-	pkgs := loadFixture(t, "svc-worker-nonconventional")
+	pkgs := loadFixture(t, archtest.SpecWorkerNonConventional())
 
 	inv, err := entrypoints.Discover(pkgs)
 	require.NoError(t, err)
@@ -264,7 +260,7 @@ func Test_4_0_B5_NonConventionalWorkerNotRecognised(t *testing.T) {
 // Test_4_0_B6_RepoWithoutEntryPoints: a library repo (no main package)
 // yields an empty inventory flagged as a library.
 func Test_4_0_B6_RepoWithoutEntryPoints(t *testing.T) {
-	pkgs := loadFixture(t, "library-repo")
+	pkgs := loadFixture(t, archtest.SpecLibraryRepo())
 
 	inv, err := entrypoints.Discover(pkgs)
 	require.NoError(t, err)
@@ -278,7 +274,7 @@ func Test_4_0_B6_RepoWithoutEntryPoints(t *testing.T) {
 // no ServiceName string literal cannot be FQN-resolved; Discover fails
 // with the precise B7 error.
 func Test_4_0_B7_FQNResolutionFailure(t *testing.T) {
-	pkgs := loadFixture(t, "svc-grpc-no-servicename")
+	pkgs := loadFixture(t, archtest.SpecGRPCNoServiceName())
 
 	inv, err := entrypoints.Discover(pkgs)
 	require.Error(t, err)
@@ -293,7 +289,7 @@ func Test_4_0_B7_FQNResolutionFailure(t *testing.T) {
 // identifier — the basic fixture's identifier ("NetworkService") would
 // give a bare name; only the descriptor yields the dotted proto FQN.
 func Test_4_0_B7_FQNViaServiceDesc(t *testing.T) {
-	pkgs := loadFixture(t, "svc-grpc-basic")
+	pkgs := loadFixture(t, archtest.SpecGRPCBasic())
 
 	inv, err := entrypoints.Discover(pkgs)
 	require.NoError(t, err)
