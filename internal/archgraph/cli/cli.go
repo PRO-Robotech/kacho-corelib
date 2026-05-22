@@ -31,7 +31,7 @@ import (
 
 	"golang.org/x/tools/go/packages"
 
-	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/check"
+	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/audit"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/entrypoints"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/gen"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/note"
@@ -212,11 +212,17 @@ func writeBackStatus(notes []*note.Note, inv *entrypoints.Inventory) error {
 // functionality notes, relative to its root.
 const archNotesDir = "docs/arch"
 
-// runAudit runs the blocking architecture checks over the discovered
-// inventory and returns the process exit code. C1 (completeness), C2
-// (dead-code) and C3 (freshness) are wired; the full combined-verdict
-// orchestration arrives in a later task. arch-audit exits non-zero if
-// any check fails.
+// runAudit runs the blocking architecture audit and returns the process
+// exit code. The C1/C2/C3 orchestration — running every check
+// unconditionally, sharing a single reachability build between C2 and
+// C3, aggregating the verdict and rendering the deterministic report —
+// lives in the audit package; runAudit is the thin transport layer that
+// loads the notes, calls audit.Run, prints the report and maps its
+// aggregate verdict to an exit code.
+//
+// arch-audit exits ExitCheckFailed if any check fails (a SKIP verdict
+// carries Passed=true, so it never makes the run fail) and
+// ExitStartupError on an internal analysis failure.
 func runAudit(
 	repoRoot string,
 	pkgs []*packages.Package,
@@ -229,46 +235,20 @@ func runAudit(
 		return ExitStartupError
 	}
 
-	c1 := check.CheckC1(inv, notes)
-	printResult(stdout, c1)
-
-	c2, err := check.CheckC2(repoRoot, pkgs, inv)
+	report, err := audit.Run(repoRoot, pkgs, inv, notes)
 	if err != nil {
 		writeString(stderr, err.Error()+"\n")
 		return ExitStartupError
 	}
-	printResult(stdout, c2)
 
-	// C3 freshness needs the reachability graph: it hashes the
-	// reachable-set files under each note's anchors.
-	g, err := reach.Compute(pkgs, inv)
-	if err != nil {
-		writeString(stderr, err.Error()+"\n")
-		return ExitStartupError
-	}
-	c3 := check.CheckC3(repoRoot, notes, g)
-	printResult(stdout, c3)
+	// Render the B5 entry-point hints and the C1/C2/C3 verdicts, ending
+	// with the aggregate "arch-audit: PASS|FAIL (...)" line.
+	audit.WriteReportWithHints(stdout, report, inv)
 
-	// arch-audit fails if any wired check fails. A SKIP verdict (a
-	// library repo's C2) carries Passed=true, so it never contributes a
-	// non-zero exit.
-	if !c1.Passed || !c2.Passed || !c3.Passed {
+	if !report.Passed {
 		return ExitCheckFailed
 	}
 	return ExitOK
-}
-
-// printResult writes one check's verdict in archgraph's deterministic,
-// CI-assertable layout: the summary line, then each finding, then any
-// advisory hint, every detail line indented two spaces.
-func printResult(stdout io.Writer, res check.Result) {
-	writeString(stdout, res.Summary+"\n")
-	for _, f := range res.Findings {
-		writeString(stdout, "  "+f.String()+"\n")
-	}
-	for _, h := range res.Hints {
-		writeString(stdout, "  "+h+"\n")
-	}
 }
 
 // loadArchNotes loads the L2 functionality notes under repoRoot's

@@ -384,11 +384,26 @@ func modulePathFromGoMod(repoRoot string) string {
 // goes to a temp file in the same directory, which is then renamed over
 // the destination, so a failure never leaves a half-written artifact and
 // a concurrent reader sees either the old file or the new one.
+//
+// Every failure path — an unwritable directory, a write/sync/rename
+// error — is reported with the single stable prefix "failed to write
+// generated artifact: <dst>: <os error>", where <dst> is the
+// artifact's destination path. arch-audit's CI-drift gate and the
+// scenario-4.0-I5 read-only-directory test assert on that exact text,
+// and the temp-file-plus-rename discipline guarantees a failed run
+// leaves no artifact in a half-written state.
 func writeArtifact(outDir, base, content string) error {
 	dst := filepath.Join(outDir, base)
+	// writeErr wraps any failure with the I5 stable prefix and the
+	// destination path, so the error text never depends on which
+	// internal step (temp-create, write, rename) failed.
+	writeErr := func(err error) error {
+		return fmt.Errorf("failed to write generated artifact: %s: %w", dst, err)
+	}
+
 	tmp, err := os.CreateTemp(outDir, ".archgraph-gen-*.tmp")
 	if err != nil {
-		return fmt.Errorf("arch-gen: temp file for %s: %w", base, err)
+		return writeErr(err)
 	}
 	tmpName := tmp.Name()
 	cleanup := func() {
@@ -397,23 +412,23 @@ func writeArtifact(outDir, base, content string) error {
 	}
 	if _, err := tmp.WriteString(content); err != nil {
 		cleanup()
-		return fmt.Errorf("arch-gen: write %s: %w", base, err)
+		return writeErr(err)
 	}
 	if err := tmp.Sync(); err != nil {
 		cleanup()
-		return fmt.Errorf("arch-gen: sync %s: %w", base, err)
+		return writeErr(err)
 	}
 	if err := tmp.Chmod(0o644); err != nil {
 		cleanup()
-		return fmt.Errorf("arch-gen: chmod %s: %w", base, err)
+		return writeErr(err)
 	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
-		return fmt.Errorf("arch-gen: close %s: %w", base, err)
+		return writeErr(err)
 	}
 	if err := os.Rename(tmpName, dst); err != nil {
 		_ = os.Remove(tmpName)
-		return fmt.Errorf("arch-gen: rename %s: %w", base, err)
+		return writeErr(err)
 	}
 	return nil
 }

@@ -12,7 +12,6 @@ import (
 	"golang.org/x/tools/go/packages"
 
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/entrypoints"
-	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/reach"
 )
 
 // keepMarker is the exact comment prefix that suppresses a C2 dead-code
@@ -77,29 +76,45 @@ func CheckC2(
 	// A library repo has no entry-point to evaluate reachability against
 	// — C2 is skipped, not failed.
 	if inv != nil && inv.IsLibraryRepo {
-		return Result{
-			Passed:  true,
-			Summary: "C2 dead-code: SKIP (library repo: no main package)",
-		}, nil
+		return c2SkipResult(), nil
 	}
 
-	// Enumerate the repository's exported functions and methods, and the
-	// archgraph:keep annotations attached to them.
-	syms, keptFuncs, invalidFindings := collectExportedSymbols(repoRoot, pkgs)
-
-	// Resolve every exported symbol to a canonical SSA name and compute
-	// the reachable union — entry-points plus the kept roots.
-	allFuncs := make([]*types.Func, 0, len(syms))
-	for _, s := range syms {
-		allFuncs = append(allFuncs, s.fn)
-	}
-	g, names, err := reach.ComputeWithSymbols(pkgs, inv, keptFuncs, allFuncs)
+	ar, err := BuildAuditReach(repoRoot, pkgs, inv)
 	if err != nil {
-		return Result{}, fmt.Errorf("C2 dead-code: reachability analysis failed: %w", err)
+		return Result{}, err
 	}
+	return CheckC2WithReach(ar), nil
+}
+
+// c2SkipResult is the passing SKIP verdict C2 returns for a library
+// repository — no main package, hence no entry-point to evaluate
+// reachability against. C1 and C3 still run.
+func c2SkipResult() Result {
+	return Result{
+		Passed:  true,
+		Summary: "C2 dead-code: SKIP (library repo: no main package)",
+	}
+}
+
+// CheckC2WithReach is CheckC2's verdict step, computed from an
+// AuditReach the caller has already built. arch-audit (the audit
+// package) builds one AuditReach — a single SSA lowering + RTA + symbol
+// resolution — and feeds it to both C2 (here) and C3, so the program is
+// lowered exactly once per audit run.
+//
+// A library-repo AuditReach (IsLibraryRepo) yields the passing SKIP
+// verdict, identical to CheckC2's own library-repo path.
+func CheckC2WithReach(ar *AuditReach) Result {
+	if ar == nil || ar.isLibrary {
+		return c2SkipResult()
+	}
+
+	syms := ar.c2Symbols
+	invalidFindings := ar.c2Invalid
+	names := ar.symbolNames
 
 	reachable := make(map[string]struct{})
-	for _, f := range g.Union().Funcs {
+	for _, f := range ar.Graph.Union().Funcs {
 		reachable[f] = struct{}{}
 	}
 
@@ -149,7 +164,7 @@ func CheckC2(
 		Findings: findings,
 		Hints:    hints,
 		Summary:  c2Summary(passed, len(findings)),
-	}, nil
+	}
 }
 
 // exportedSymbol is one exported function or method of the repository: a
