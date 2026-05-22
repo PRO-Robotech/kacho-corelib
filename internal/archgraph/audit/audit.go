@@ -3,26 +3,29 @@
 //
 // # What arch-audit is
 //
-// arch-audit is archgraph's CI-blocking gate. It runs the three
-// architecture checks — C1 completeness, C2 dead-code, C3 freshness —
-// over a repository and turns their combined verdict into a process
-// exit code: zero when every check passes, non-zero when any one fails.
+// arch-audit is archgraph's CI-blocking gate. It runs the four
+// architecture checks — C1 completeness, C2 dead-code, C3 freshness, C4
+// doc-coverage — over a repository and turns their combined verdict
+// into a process exit code: zero when every check passes, non-zero when
+// any one fails.
 //
 // # Run every check, always
 //
-// arch-audit never short-circuits. A failing C1 does not stop C2 or C3
-// from running: a CI run must surface the *complete* set of architecture
-// deviations in one pass, so an engineer fixes them all at once rather
-// than rediscovering the next one on the next CI cycle. Run therefore
-// invokes C1, C2 and C3 unconditionally and aggregates their Results.
+// arch-audit never short-circuits. A failing C1 does not stop C2, C3 or
+// C4 from running: a CI run must surface the *complete* set of
+// architecture deviations in one pass, so an engineer fixes them all at
+// once rather than rediscovering the next one on the next CI cycle. Run
+// therefore invokes C1, C2, C3 and C4 unconditionally and aggregates
+// their Results.
 //
 // # Deterministic, CI-assertable output
 //
 // The rendered audit report is fully deterministic: findings are grouped
-// by check in the fixed order C1 → C2 → C3, and within a check they keep
-// the per-check Result's own deterministic sort (C1 by symbol, C2 by
-// symbol, C3 by note path). Two runs over an unchanged repository
-// produce byte-identical output, so a CI log diff is meaningful.
+// by check in the fixed order C1 → C2 → C3 → C4, and within a check they
+// keep the per-check Result's own deterministic sort (C1 by symbol, C2
+// by symbol, C3 by note path, C4 by package-qualified symbol). Two runs
+// over an unchanged repository produce byte-identical output, so a CI
+// log diff is meaningful.
 //
 // Every finding line is self-contained — it names the offending object
 // (a gRPC method FQN, an exported symbol with its file:line, a note
@@ -60,36 +63,40 @@ import (
 )
 
 // Report is the outcome of an arch-audit run: the combined pass/fail
-// verdict and the three per-check Results in the fixed C1 → C2 → C3
+// verdict and the four per-check Results in the fixed C1 → C2 → C3 → C4
 // order. It is the value the cli package turns into an exit code and
 // the audit text turns into CI-log lines.
 type Report struct {
-	// Passed is the aggregate verdict: true iff C1, C2 and C3 all
+	// Passed is the aggregate verdict: true iff C1, C2, C3 and C4 all
 	// passed. A SKIP (a library repo's C2) carries Passed=true, so it
 	// never makes the aggregate fail.
 	Passed bool
-	// C1, C2, C3 are the individual check verdicts, always populated —
-	// arch-audit runs every check regardless of any earlier failure.
+	// C1, C2, C3, C4 are the individual check verdicts, always
+	// populated — arch-audit runs every check regardless of any earlier
+	// failure.
 	C1 check.Result
 	C2 check.Result
 	C3 check.Result
+	C4 check.Result
 }
 
 // summaryLine is the single aggregate verdict line of an audit report,
-// e.g. "arch-audit: PASS (C1 PASS, C2 PASS, C3 PASS)" or
-// "arch-audit: FAIL (C1 PASS, C2 FAIL, C3 PASS)". It is the line CI
-// asserts on; the per-check verdict tokens are derived from each
-// Result.Passed, never parsed from a Result's own free-text Summary.
+// e.g. "arch-audit: PASS (C1 PASS, C2 PASS, C3 PASS, C4 PASS)" or
+// "arch-audit: FAIL (C1 PASS, C2 FAIL, C3 PASS, C4 PASS)". It is the
+// line CI asserts on; the per-check verdict tokens are derived from
+// each Result.Passed, never parsed from a Result's own free-text
+// Summary.
 func (r Report) summaryLine() string {
 	verdict := "PASS"
 	if !r.Passed {
 		verdict = "FAIL"
 	}
-	return fmt.Sprintf("arch-audit: %s (C1 %s, C2 %s, C3 %s)",
+	return fmt.Sprintf("arch-audit: %s (C1 %s, C2 %s, C3 %s, C4 %s)",
 		verdict,
 		passToken(r.C1.Passed),
 		passToken(r.C2.Passed),
-		passToken(r.C3.Passed))
+		passToken(r.C3.Passed),
+		passToken(r.C4.Passed))
 }
 
 // passToken renders a single check's verdict token for the aggregate
@@ -102,17 +109,18 @@ func passToken(passed bool) string {
 }
 
 // Run executes the arch-audit pass: it runs C1 completeness, C2
-// dead-code and C3 freshness over the repository, aggregates their
-// verdicts into a Report and returns it.
+// dead-code, C3 freshness and C4 doc-coverage over the repository,
+// aggregates their verdicts into a Report and returns it.
 //
-// All three checks run unconditionally — Run never short-circuits on an
-// earlier failure, so the Report always carries a complete C1/C2/C3
-// picture (scenario 4.0-I2).
+// All four checks run unconditionally — Run never short-circuits on an
+// earlier failure, so the Report always carries a complete
+// C1/C2/C3/C4 picture (scenario 4.0-I2).
 //
-// repoRoot is the repository's module root (used by C2/C3 to render
+// repoRoot is the repository's module root (used by C2/C3/C4 to render
 // positions repository-relative); pkgs the repository's loaded
 // packages; inv its entry-point inventory; notes its L2 functionality
-// notes. C2 and C3 share a single reachability build computed here.
+// notes. C2 and C3 share a single reachability build computed here; C4
+// is a pure AST walk over pkgs and needs no graph.
 //
 // Run returns an error only on an internal analysis failure (a
 // reachability build that cannot be completed) — never on an
@@ -144,11 +152,16 @@ func Run(
 	// C3 freshness over the same reachability graph.
 	c3 := check.CheckC3(repoRoot, notes, ar.Graph)
 
+	// C4 doc-coverage is a pure AST walk over the loaded packages — no
+	// reachability graph needed.
+	c4 := check.CheckC4(repoRoot, pkgs)
+
 	return Report{
-		Passed: c1.Passed && c2.Passed && c3.Passed,
+		Passed: c1.Passed && c2.Passed && c3.Passed && c4.Passed,
 		C1:     c1,
 		C2:     c2,
 		C3:     c3,
+		C4:     c4,
 	}, nil
 }
 
@@ -162,14 +175,17 @@ func Run(
 //	  ...
 //	<C3 summary line>
 //	  ...
-//	arch-audit: PASS|FAIL (C1 ..., C2 ..., C3 ...)
+//	<C4 summary line>
+//	  ...
+//	arch-audit: PASS|FAIL (C1 ..., C2 ..., C3 ..., C4 ...)
 //
 // Findings are grouped strictly by check in the fixed order C1 → C2 →
-// C3; within a check the per-check Result's own deterministic order is
-// preserved. The trailing aggregate line is the CI gate's verdict.
-// Two runs over an unchanged repository emit byte-identical output.
+// C3 → C4; within a check the per-check Result's own deterministic
+// order is preserved. The trailing aggregate line is the CI gate's
+// verdict. Two runs over an unchanged repository emit byte-identical
+// output.
 func WriteReport(w io.Writer, report Report) {
-	for _, res := range []check.Result{report.C1, report.C2, report.C3} {
+	for _, res := range []check.Result{report.C1, report.C2, report.C3, report.C4} {
 		writeCheck(w, res)
 	}
 	writeLine(w, report.summaryLine())

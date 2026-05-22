@@ -141,6 +141,47 @@ func LegacyBeta() {}
 	return s
 }
 
+// SpecAuditC4Fails (I) — a NetworkService with one Create RPC anchored
+// by a fresh L2 note (C1 PASS, C3 PASS); every exported symbol is
+// reachable (C2 PASS); but the handler's helper method validateSpec
+// carries no doc-comment, so C4 FAILs. arch-audit must still run and
+// report C1/C2/C3, exit non-zero, and the aggregate line must show
+// exactly C4 FAIL.
+func SpecAuditC4Fails() Spec {
+	const module = "example.com/auditc4"
+	s := grpcServiceBase(module, []string{"Create"})
+	s.Notes = []NoteSpec{{
+		File: "network-lifecycle.md", Repo: "auditc4",
+		RPCAnchors: []string{"kacho.cloud.vpc.v1.NetworkService/Create"},
+		SourceSHA:  FreshSHA,
+		Body: "# Network lifecycle\n\n" +
+			"This L2 note anchors NetworkService/Create. The handler carries\n" +
+			"an undocumented helper so C4 doc-coverage fails.\n",
+	}}
+	s.Files = map[string]string{
+		// validateSpec is reachable from Create (so C2 passes) but
+		// carries no doc-comment (so C4 fails).
+		"internal/handler/handler.go": `// Package handler implements the NetworkService gRPC handler of the
+// audit-C4 fixture: validateSpec is deliberately undocumented.
+package handler
+
+// Handler implements pb.NetworkServiceServer.
+type Handler struct{}
+
+// New returns a fresh Handler.
+func New() *Handler { return &Handler{} }
+
+// Create handles the Create RPC entry-point.
+func (h *Handler) Create() {
+	h.validateSpec()
+}
+
+func (h *Handler) validateSpec() {}
+`,
+	}
+	return s
+}
+
 // oneCreateNoteFor is oneCreateNote with the repo field overridden — the
 // audit fixtures reuse the C2 fixture bodies but under their own module
 // and repo identity.

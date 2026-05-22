@@ -1,18 +1,20 @@
 // Package check implements archgraph's blocking architecture checks —
 // the verdicts arch-audit turns into a CI exit code.
 //
-// archgraph defines three checks:
+// archgraph defines four checks:
 //
 //   - C1 — completeness: the set of a repository's entry-points must be
 //     in bijection with the anchors of its L2 functionality notes;
 //   - C2 — reachability (Task 6);
-//   - C3 — freshness (Task 7).
+//   - C3 — freshness (Task 7);
+//   - C4 — doc-coverage: every repo-owned function, method, package
+//     variable and constant must carry a Go doc-comment.
 //
 // This file holds the cross-check vocabulary every check shares: a
 // Finding (one machine-checked deviation, with deterministic text) and
 // a Result (a check's verdict — passed/failed, its findings, any
 // advisory hints and a one-line summary). C1 is implemented in c1.go;
-// C2 and C3 reuse Finding and Result unchanged.
+// C2, C3 and C4 reuse Finding and Result unchanged.
 //
 // The package depends only on the standard library and archgraph's own
 // entrypoints and note packages; it imports no gRPC, persistence or
@@ -30,21 +32,24 @@ const (
 	C2 Check = "C2"
 	// C3 marks a freshness finding (Task 7).
 	C3 Check = "C3"
+	// C4 marks a doc-coverage finding — an undocumented function,
+	// method, package variable or constant.
+	C4 Check = "C4"
 )
 
 // Finding is one machine-detected architecture deviation. It is the
 // shared currency of every check: C1 reports undocumented entry-points,
-// stale anchors and duplicate anchors as Findings; C2 and C3 (later
-// tasks) reuse the type unchanged.
+// stale anchors and duplicate anchors as Findings; C2, C3 and C4 reuse
+// the type unchanged.
 //
 // Symbol is the offending entity — a gRPC method FQN, a worker type
-// name, or an entry-point name — and is the deterministic sort key for
-// a check's finding list. Reason is the full, self-contained
-// human-readable explanation, exactly as it appears in the audit
-// output. Check is structured metadata so a combined-verdict pass
-// (Task 10) can group findings without parsing text.
+// name, an entry-point name, or a package-qualified symbol — and is the
+// deterministic sort key for a check's finding list. Reason is the
+// full, self-contained human-readable explanation, exactly as it
+// appears in the audit output. Check is structured metadata so a
+// combined-verdict pass can group findings without parsing text.
 type Finding struct {
-	// Check is the check that produced the finding (C1/C2/C3). It is
+	// Check is the check that produced the finding (C1/C2/C3/C4). It is
 	// metadata for grouping; it is not part of the printed line.
 	Check Check
 	// Symbol is the offending entity; it is the sort key within a

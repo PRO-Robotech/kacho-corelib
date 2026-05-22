@@ -451,6 +451,88 @@ func SpecGenRPCContractInternal() Spec {
 	return s
 }
 
+// genEnrichDomain is the domain package of the L3/L4 enrichment
+// fixture: it carries a documented package-level variable
+// (DefaultRegion) read by two documented functions, so L4's
+// "variable → functions" link has a non-trivial, sorted user list to
+// render. Every declaration is documented so the synopsis columns are
+// populated rather than placeholdered.
+const genEnrichDomain = `// Package domain holds the domain surface of the L3/L4 enrichment
+// fixture.
+package domain
+
+// DefaultRegion is the region a Network defaults to when none is set.
+// It is read by RegionOf and by Normalize below.
+var DefaultRegion = "ru-central1"
+
+// RegionOf returns the effective region of a Network: its own region
+// when set, otherwise the package default.
+func RegionOf(region string) string {
+	if region == "" {
+		return DefaultRegion
+	}
+	return region
+}
+
+// Normalize rewrites an empty region to the package default in place.
+func Normalize(region *string) {
+	if *region == "" {
+		*region = DefaultRegion
+	}
+}
+
+// ValidateSpec validates a Network spec. Reachable from the Create RPC,
+// so its synopsis appears in the L3 call-tree.
+func ValidateSpec() error { return nil }
+`
+
+// genEnrichHandler is the handler of the L3/L4 enrichment fixture: its
+// Create RPC reaches the documented domain.ValidateSpec, so the L3
+// call-tree carries that function's synopsis and the L4 function →
+// functionality table maps it to the anchored functionality.
+const genEnrichHandler = `// Package handler implements the NetworkService gRPC handler of the
+// L3/L4 enrichment fixture.
+package handler
+
+import "example.com/genenrich/internal/domain"
+
+// Handler implements pb.NetworkServiceServer.
+type Handler struct{}
+
+// New returns a fresh Handler.
+func New() *Handler { return &Handler{} }
+
+// Create handles the Create RPC. It validates the spec before
+// persisting it.
+func (h *Handler) Create() {
+	_ = domain.ValidateSpec()
+}
+`
+
+// SpecGenEnrich is the L3/L4 enrichment fixture: a NetworkService whose
+// Create RPC reaches a documented domain function, and a domain package
+// carrying a package-level variable read by two documented functions.
+// It lets the enrichment tests assert that L3 call-tree bullets carry
+// doc-comment synopses, that L4 links a variable to its repo-function
+// users, and that the L4 function → functionality table maps a
+// reachable function to its L2 functionality.
+func SpecGenEnrich() Spec {
+	s := grpcServiceBase("example.com/genenrich", []string{"Create"})
+	s.Notes = []NoteSpec{{
+		File: "network-lifecycle.md", Repo: "genenrich",
+		RPCAnchors: []string{"kacho.cloud.vpc.v1.NetworkService/Create"},
+		SourceSHA:  FreshSHA,
+		Body: "# Network lifecycle\n\n" +
+			"This curated L2 note anchors NetworkService/Create. arch-gen must\n" +
+			"enrich the L3 call-tree and the L4 tables from the code.\n",
+	}}
+	s.Files = map[string]string{
+		"internal/handler/handler.go": genEnrichHandler,
+		"internal/domain/domain.go":   genEnrichDomain,
+	}
+	return s
+}
+
 // rehome rewrites every occurrence of an old module path segment with a new
 // one in fixture source. genHandlerSource imports "example.com/genbasic/…";
 // a fixture re-homed under a different module needs those import paths

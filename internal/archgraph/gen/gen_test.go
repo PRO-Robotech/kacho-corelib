@@ -443,6 +443,121 @@ func Test_archgen_L3RPCContractNoProtoModule(t *testing.T) {
 	}
 }
 
+// Test_archgen_L3CallTreeCarriesSynopsis: every function in an L3
+// artifact's `## Call tree` is annotated with the synopsis of its Go
+// doc-comment — the "what it does" — recovered from the code.
+func Test_archgen_L3CallTreeCarriesSynopsis(t *testing.T) {
+	root := runGen(t, archtest.SpecGenEnrich())
+
+	l3 := readGenerated(t, root, "l3-network-lifecycle.md")
+
+	// The call-tree bullets carry "<symbol> — <synopsis>".
+	require.Contains(t, l3,
+		"Create handles the Create RPC.",
+		"the L3 call-tree must carry Create's doc-comment synopsis")
+	require.Contains(t, l3,
+		"ValidateSpec validates a Network spec.",
+		"the L3 call-tree must carry the transitively reachable "+
+			"ValidateSpec's doc-comment synopsis")
+
+	// A call-tree bullet keeps the "- `<symbol>` — <synopsis>" shape.
+	// The call-tree bullet names the package-qualified symbol (it begins
+	// with the fixture module path), distinguishing it from an
+	// Exported-signatures bullet, which begins "- `func ...".
+	var sawAnnotatedBullet bool
+	for _, ln := range strings.Split(l3, "\n") {
+		ln = strings.TrimSpace(ln)
+		if strings.HasPrefix(ln, "- `example.com/genenrich") &&
+			strings.Contains(ln, "ValidateSpec") {
+			require.Contains(t, ln, "` — ",
+				"a call-tree bullet must separate the symbol from its synopsis")
+			sawAnnotatedBullet = true
+		}
+	}
+	require.True(t, sawAnnotatedBullet,
+		"the L3 call-tree must list ValidateSpec as an annotated bullet")
+}
+
+// Test_archgen_L3CallTreeUndocumentedSynopsis: a reachable function
+// with no Go doc-comment is annotated with the C4-cross-referencing
+// placeholder rather than left blank.
+func Test_archgen_L3CallTreeUndocumentedSynopsis(t *testing.T) {
+	// Phase 1 — the baseline enrichment fixture is fully documented.
+	root := archtest.BuildRepo(t, archtest.SpecGenEnrich())
+
+	// Phase 2 — strip ValidateSpec's doc-comment in place.
+	domainPath := filepath.Join(root, "internal", "domain", "domain.go")
+	raw, err := os.ReadFile(domainPath)
+	require.NoError(t, err)
+	stripped := strings.Replace(string(raw),
+		"// ValidateSpec validates a Network spec. Reachable from the Create RPC,\n"+
+			"// so its synopsis appears in the L3 call-tree.\n",
+		"", 1)
+	require.NotEqual(t, string(raw), stripped,
+		"the ValidateSpec doc-comment must have been stripped")
+	require.NoError(t, os.WriteFile(domainPath, []byte(stripped), 0o644))
+
+	pkgs, inv, g, notes := genInputs(t, root)
+	require.NoError(t, gen.Generate(root, pkgs, inv, g, notes))
+
+	l3 := readGenerated(t, root, "l3-network-lifecycle.md")
+	require.Contains(t, l3, "(undocumented — see C4)",
+		"an undocumented call-tree function must carry the C4 placeholder")
+}
+
+// Test_archgen_L4VariableLinkedToFunctions: the L4 artifact links a
+// package-level variable to the repo functions that read or write it —
+// the "variable → functions" use-def link.
+func Test_archgen_L4VariableLinkedToFunctions(t *testing.T) {
+	root := runGen(t, archtest.SpecGenEnrich())
+
+	l4 := readGenerated(t, root, "l4-genenrich.md")
+
+	// DefaultRegion is read by RegionOf and Normalize — both must appear
+	// in its "Used by" cell.
+	require.Contains(t, l4, "DefaultRegion",
+		"L4 must tabulate the package-level variable DefaultRegion")
+	require.Regexp(t, `DefaultRegion.*RegionOf`, l4,
+		"L4 must link DefaultRegion to its reader RegionOf")
+	require.Regexp(t, `DefaultRegion.*Normalize`, l4,
+		"L4 must link DefaultRegion to its reader Normalize")
+}
+
+// Test_archgen_L4FunctionToFunctionality: the L4 artifact carries a
+// function → functionality table mapping each repo function to the L2
+// functionality whose anchors reach it, and marks a function reached by
+// no functionality as "(unreached)".
+func Test_archgen_L4FunctionToFunctionality(t *testing.T) {
+	root := runGen(t, archtest.SpecGenEnrich())
+
+	l4 := readGenerated(t, root, "l4-genenrich.md")
+
+	require.Contains(t, l4, "Functions → functionality",
+		"the L4 artifact must carry the function → functionality section")
+
+	// ValidateSpec is reachable from NetworkService/Create, anchored by
+	// the network-lifecycle note — it belongs to that functionality.
+	require.Regexp(t, "ValidateSpec.*`network-lifecycle`", l4,
+		"L4 must map the reachable ValidateSpec to its functionality")
+
+	// New / RegionOf / Normalize are not reachable from any L2 anchor —
+	// they must be marked "(unreached)".
+	require.Regexp(t, `RegionOf.*\(unreached\)`, l4,
+		"L4 must mark the unreached RegionOf as (unreached)")
+}
+
+// Test_archgen_L4SymbolSynopsis: every exported type, variable and
+// constant in the L4 artifact carries the synopsis of its Go
+// doc-comment.
+func Test_archgen_L4SymbolSynopsis(t *testing.T) {
+	root := runGen(t, archtest.SpecGenEnrich())
+
+	l4 := readGenerated(t, root, "l4-genenrich.md")
+	require.Contains(t, l4,
+		"DefaultRegion is the region a Network defaults to",
+		"L4 must carry the variable's doc-comment synopsis")
+}
+
 // snapshotGenerated records the content of every .md file under
 // docs/arch/generated/, keyed by base name.
 func snapshotGenerated(t *testing.T, root string) map[string]string {

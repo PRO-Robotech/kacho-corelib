@@ -21,7 +21,10 @@
 // reachable-sets of the note's anchors:
 //
 //   - the call-tree — the deterministically sorted canonical names of
-//     every function reachable from the functionality's entry-points;
+//     every function reachable from the functionality's entry-points,
+//     each annotated with the synopsis of its Go doc-comment (the
+//     "what it does"), or the C4-cross-referencing placeholder when it
+//     carries no doc-comment;
 //   - the exported signatures — for every reachable function that is an
 //     exported function or method of *this* repository, its Go
 //     signature as written in source.
@@ -33,20 +36,26 @@
 //
 // Generate writes a single docs/arch/generated/l4-<repo>.md tabulating
 // the application's domain surface: every exported type of the
-// repository's own packages (with its exported struct fields) and every
-// exported package-level constant.
+// repository's own packages (with its exported struct fields), every
+// exported package-level variable and every exported package-level
+// constant — each carrying its doc-comment synopsis. L4 additionally
+// renders the structural links archgraph recovers from the code: a
+// type / variable / constant is linked to the repo functions that
+// reference it (use-def for a var/const, signature usage for a type),
+// and a "function → functionality" table maps every repo function to
+// the L2 functionality (or functionalities) whose anchors reach it —
+// "(unreached)" when no functionality does.
 //
-// # L4 scope — types, fields and constants
+// # L4 scope — types, fields, variables and constants
 //
 // L4 is deliberately scoped to exported types, their exported struct
-// fields and exported package-level constants. Two further candidate
-// tables — Postgres column inventories and configuration keys — were
-// considered and left out: extracting them reliably needs domain
-// knowledge of the ORM-less sqlc/pgx and viper/koanf conventions
-// (struct-tag dialects, migration-file parsing) disproportionate to a
-// generic, repository-agnostic generator. A repository that wants those
-// tables can curate them in an L2 note. The scoping is fixed and the
-// arch-gen acceptance fixture (scenario 4.0-D1) is shaped to match it.
+// fields, exported package-level variables and exported package-level
+// constants. Two further candidate tables — Postgres column inventories
+// and configuration keys — were considered and left out: extracting
+// them reliably needs domain knowledge of the ORM-less sqlc/pgx and
+// viper/koanf conventions (struct-tag dialects, migration-file parsing)
+// disproportionate to a generic, repository-agnostic generator. A
+// repository that wants those tables can curate them in an L2 note.
 //
 // # Determinism and atomicity
 //
@@ -127,6 +136,19 @@ func Generate(
 	exported := collectExportedFuncs(repoRoot, pkgs)
 	names := resolveSSANames(pkgs, inv, exported)
 
+	// L3/L4 enrichment indexes, all computed once and shared:
+	//   - synopsisBySSA — every repo function (exported or not) keyed by
+	//     its canonical SSA name, carrying its doc-comment synopsis, so an
+	//     L3 call-tree bullet can be annotated with "what it does";
+	//   - symUsers — the use-def index mapping each package var/const and
+	//     named type to the repo functions that reference it (L4 links);
+	//   - funcFunctionality — every repo function mapped to the L2
+	//     functionality (or functionalities) whose anchors reach it.
+	synopsisBySSA := repoFuncsBySSA(pkgs, inv, collectRepoFuncs(pkgs))
+	symUsers := collectSymbolUsers(pkgs)
+	funcFunctionality := buildFuncFunctionalityRows(
+		synopsisBySSA, notes, g, collectRepoPkgPaths(pkgs))
+
 	// repoPkgs is the set of import paths of the repository's own loaded
 	// packages — the scope an L3 call-tree is restricted to. reach records
 	// whole-program reachable-sets (RTA transitively descends into the
@@ -159,7 +181,8 @@ func Generate(
 			continue
 		}
 		base := l3FileName(n)
-		content := renderL3(n, g, exported, names, repoPkgs, rpcContract, contractResolved)
+		content := renderL3(n, g, exported, names, repoPkgs, rpcContract,
+			contractResolved, synopsisBySSA)
 		if err := writeArtifact(outDir, base, content); err != nil {
 			return err
 		}
@@ -169,8 +192,9 @@ func Generate(
 	// L4 — a single per-repository domain-surface artifact.
 	repo := repoName(repoRoot, pkgs)
 	l4Base := "l4-" + repo + ".md"
-	surface := collectDomainSurface(repoRoot, pkgs)
-	if err := writeArtifact(outDir, l4Base, renderL4(repo, surface)); err != nil {
+	surface := collectDomainSurface(repoRoot, pkgs, symUsers)
+	if err := writeArtifact(outDir, l4Base,
+		renderL4(repo, surface, funcFunctionality)); err != nil {
 		return err
 	}
 	artifacts[l4Base] = struct{}{}
@@ -223,6 +247,7 @@ func renderL3(
 	repoPkgs map[string]struct{},
 	rpcContract map[string]proto.RPC,
 	contractResolved bool,
+	synopsisBySSA map[string]repoFunc,
 ) string {
 	var b strings.Builder
 	b.WriteString(genMarker + "\n\n")
@@ -245,14 +270,19 @@ func renderL3(
 
 	// Call-tree — the union of the reachable-sets of every anchor, scoped
 	// to functions defined in this repository (stdlib and dependency
-	// functions RTA descended into are dropped from the document).
+	// functions RTA descended into are dropped from the document). Each
+	// function is annotated with the synopsis of its Go doc-comment — the
+	// "what it does" — recovered from synopsisBySSA; a function with no
+	// doc-comment carries the C4-cross-referencing placeholder. The
+	// bullet keeps the `- ` `<symbol>` ` prefix so the call-tree's
+	// repo-scoping regression scan stays valid.
 	funcs := reachableFuncs(n, g, repoPkgs)
 	b.WriteString("## Call tree\n\n")
 	if len(funcs) == 0 {
 		b.WriteString("_No reachable functions._\n\n")
 	} else {
 		for _, f := range funcs {
-			fmt.Fprintf(&b, "- `%s`\n", f)
+			fmt.Fprintf(&b, "- `%s` — %s\n", f, callTreeSynopsis(f, synopsisBySSA))
 		}
 		b.WriteString("\n")
 	}
@@ -437,6 +467,22 @@ func reachableFuncs(n *note.Note, g *reach.Graph, repoPkgs map[string]struct{}) 
 		}
 	}
 	return sortedKeys(set)
+}
+
+// callTreeSynopsis returns the doc-comment synopsis an L3 call-tree
+// bullet carries for the function with canonical SSA name ssaName. A
+// function whose synopsis index entry is missing (a synthetic wrapper,
+// or one the SSA-name resolver could not match) renders the
+// undocumented placeholder, so every bullet still names "what it does"
+// — or points the reader at the C4 doc-coverage check that will force
+// the comment to be written. The synopsis is escaped for the bullet so
+// a stray backtick or newline cannot corrupt the artifact.
+func callTreeSynopsis(ssaName string, synopsisBySSA map[string]repoFunc) string {
+	rf, ok := synopsisBySSA[ssaName]
+	if !ok || rf.synopsis == "" {
+		return undocumentedSynopsis
+	}
+	return mdCell(rf.synopsis)
 }
 
 // collectRepoPkgPaths returns the set of import paths of the

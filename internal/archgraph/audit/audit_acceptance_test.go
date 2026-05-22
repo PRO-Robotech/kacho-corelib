@@ -125,13 +125,13 @@ func Test_4_0_I1_AllPassExitZero(t *testing.T) {
 
 	report, out := runAudit(t, root)
 	require.True(t, report.Passed, "every check passes, so the audit passes; output:\n%s", out)
-	require.True(t, report.C1.Passed && report.C2.Passed && report.C3.Passed)
-	require.Contains(t, out, "arch-audit: PASS (C1 PASS, C2 PASS, C3 PASS)",
+	require.True(t, report.C1.Passed && report.C2.Passed && report.C3.Passed && report.C4.Passed)
+	require.Contains(t, out, "arch-audit: PASS (C1 PASS, C2 PASS, C3 PASS, C4 PASS)",
 		"the aggregate line must report PASS for every check")
 
 	code, cliOut := runArchAuditCLI(t, root)
 	require.Equal(t, cli.ExitOK, code, "arch-audit must exit 0; output:\n%s", cliOut)
-	require.Contains(t, cliOut, "arch-audit: PASS (C1 PASS, C2 PASS, C3 PASS)")
+	require.Contains(t, cliOut, "arch-audit: PASS (C1 PASS, C2 PASS, C3 PASS, C4 PASS)")
 }
 
 // --- 4.0-I2 — one check fails; every check still runs ----------------------
@@ -148,14 +148,39 @@ func Test_4_0_I2_OneFailsExitNonZero(t *testing.T) {
 	require.True(t, report.C1.Passed, "C1 must still have run and passed")
 	require.False(t, report.C2.Passed, "C2 must have failed")
 	require.True(t, report.C3.Passed, "C3 must still have run and passed")
-	require.Contains(t, out, "arch-audit: FAIL (C1 PASS, C2 FAIL, C3 PASS)",
-		"the aggregate line must report all three verdicts, C1 and C3 still PASS")
+	require.True(t, report.C4.Passed, "C4 must still have run and passed")
+	require.Contains(t, out, "arch-audit: FAIL (C1 PASS, C2 FAIL, C3 PASS, C4 PASS)",
+		"the aggregate line must report all four verdicts, C1/C3/C4 still PASS")
 
 	code, cliOut := runArchAuditCLI(t, root)
 	require.Equal(t, cli.ExitCheckFailed, code,
 		"arch-audit must exit non-zero on a C2 failure; output:\n%s", cliOut)
 	require.NotEqual(t, cli.ExitOK, code)
-	require.Contains(t, cliOut, "arch-audit: FAIL (C1 PASS, C2 FAIL, C3 PASS)")
+	require.Contains(t, cliOut, "arch-audit: FAIL (C1 PASS, C2 FAIL, C3 PASS, C4 PASS)")
+}
+
+// Test_4_0_I2_C4FailsExitNonZero: when C4 fails (an undocumented
+// function) but C1, C2 and C3 pass, arch-audit exits non-zero, the
+// aggregate line shows C4 FAIL with C1/C2/C3 still PASS — proof
+// arch-audit ran every check and C4 is a blocking check.
+func Test_4_0_I2_C4FailsExitNonZero(t *testing.T) {
+	root := buildAndResolve(t, archtest.SpecAuditC4Fails())
+
+	report, out := runAudit(t, root)
+	require.False(t, report.Passed, "a C4 failure fails the audit; output:\n%s", out)
+	require.True(t, report.C1.Passed, "C1 must still have run and passed")
+	require.True(t, report.C2.Passed, "C2 must still have run and passed")
+	require.True(t, report.C3.Passed, "C3 must still have run and passed")
+	require.False(t, report.C4.Passed, "C4 must have failed on the undocumented helper")
+	require.Contains(t, out, "arch-audit: FAIL (C1 PASS, C2 PASS, C3 PASS, C4 FAIL)",
+		"the aggregate line must report C4 FAIL with C1/C2/C3 still PASS")
+	require.Contains(t, out, "undocumented function:",
+		"the C4 finding must appear in the audit output")
+
+	code, cliOut := runArchAuditCLI(t, root)
+	require.Equal(t, cli.ExitCheckFailed, code,
+		"arch-audit must exit non-zero on a C4 failure; output:\n%s", cliOut)
+	require.Contains(t, cliOut, "arch-audit: FAIL (C1 PASS, C2 PASS, C3 PASS, C4 FAIL)")
 }
 
 // --- 4.0-I3 — deterministic, sorted output ---------------------------------
