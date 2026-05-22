@@ -22,6 +22,7 @@ package check_test
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -160,6 +161,97 @@ func Test_4_0_G4_C3_DeterministicHash(t *testing.T) {
 	require.Equal(t, h1, hB,
 		"AnchorHash must be invariant to the repository checkout path")
 	require.NotEmpty(t, h1, "AnchorHash of an anchored note must be non-empty")
+}
+
+// Test_4_0_G4_C3_HashScopedToRepoFiles: the freshness hash must be
+// computed over files of the analysed repository ONLY. With a fixture
+// whose anchor genuinely reaches into the standard library — its
+// handler calls fmt.Sprintf, so RTA pulls GOROOT-resident source files
+// into the reachable-set — AnchorHash must:
+//
+//   - feed only files under repoRoot into the digest (no absolute path,
+//     no GOROOT/GOMODCACHE-resident file), and
+//   - still be deterministic and checkout-path-invariant.
+//
+// Hashing the stdlib / dependency files would tie source_sha to the
+// toolchain install path and Go version: a Go-minor bump would stale
+// every note on a real repo at once. The minimal empty-handler C3
+// fixtures never reach stdlib, so the original G4 test could not catch
+// this — this fixture deliberately does.
+func Test_4_0_G4_C3_HashScopedToRepoFiles(t *testing.T) {
+	rootA, gA := c3Fixture(t, archtest.SpecC3StdlibReach())
+	rootB, gB := c3Fixture(t, archtest.SpecC3StdlibReach())
+	require.NotEqual(t, rootA, rootB,
+		"the two fixture builds must live at different absolute paths")
+
+	notesA, err := note.Load(filepath.Join(rootA, "docs", "arch"))
+	require.NoError(t, err)
+	require.Len(t, notesA, 1)
+	notesB, err := note.Load(filepath.Join(rootB, "docs", "arch"))
+	require.NoError(t, err)
+	require.Len(t, notesB, 1)
+
+	// The fixture's handler calls fmt.Sprintf — confirm the anchor's
+	// reachable-set genuinely spans stdlib files, so this test exercises
+	// the defect rather than a no-op. Without stdlib in the set the
+	// assertion below would pass vacuously.
+	stdlibSeen := false
+	for _, rs := range gA.Sets {
+		for _, f := range rs.Files {
+			if isStdlibOrDepFile(t, rootA, f) {
+				stdlibSeen = true
+			}
+		}
+	}
+	require.True(t, stdlibSeen,
+		"fixture precondition: the anchor's reachable-set must span stdlib/dep "+
+			"files, otherwise the repo-scoping assertion is vacuous")
+
+	// (a) every file fed into the digest must be repository-relative and
+	// resolve under repoRoot — no absolute path, no GOROOT/GOMODCACHE leak.
+	hashFilesA := check.AnchorHashFiles(rootA, notesA[0], gA)
+	require.NotEmpty(t, hashFilesA,
+		"the anchored note must hash at least its own handler/repo files")
+	for _, rel := range hashFilesA {
+		require.False(t, filepath.IsAbs(filepath.FromSlash(rel)),
+			"AnchorHash must not feed absolute paths into the digest; got %q", rel)
+		require.False(t, strings.HasPrefix(rel, "../") || rel == "..",
+			"AnchorHash must not feed out-of-repo (.. prefixed) paths into the "+
+				"digest; got %q", rel)
+		abs := filepath.Join(rootA, filepath.FromSlash(rel))
+		require.False(t, isStdlibOrDepFile(t, rootA, abs),
+			"AnchorHash must scope the digest to in-repo files only — %q is a "+
+				"stdlib/dependency file outside repoRoot", rel)
+	}
+
+	// (b) the digest stays deterministic and checkout-path-invariant even
+	// though the reachable-set spans stdlib files at different absolute
+	// GOROOT paths on the two builds.
+	h1 := check.AnchorHash(rootA, notesA[0], gA)
+	h2 := check.AnchorHash(rootA, notesA[0], gA)
+	require.Equal(t, h1, h2,
+		"AnchorHash must be deterministic across runs over the same fixture")
+
+	hB := check.AnchorHash(rootB, notesB[0], gB)
+	require.Equal(t, h1, hB,
+		"AnchorHash must be invariant to the checkout path even when the "+
+			"reachable-set spans stdlib files at different GOROOT paths")
+	require.NotEmpty(t, h1, "AnchorHash of an anchored note must be non-empty")
+}
+
+// isStdlibOrDepFile reports whether abs is a source file outside the
+// repository rooted at repoRoot — a GOROOT-resident stdlib file or a
+// GOMODCACHE-resident dependency file. It is the test-side oracle for
+// "this file is outside C3's mandate": a path that cannot be made
+// repoRoot-relative without a ".." prefix is, by definition, outside the
+// repo.
+func isStdlibOrDepFile(t *testing.T, repoRoot, abs string) bool {
+	t.Helper()
+	rel, err := filepath.Rel(repoRoot, abs)
+	if err != nil {
+		return true
+	}
+	return strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".."
 }
 
 // Test_4_0_G5_C3_FailMissingSourceSHA: a note with a non-empty anchors

@@ -260,6 +260,61 @@ func SpecC3PlannedSkipped() Spec {
 	return s
 }
 
+// SpecC3StdlibReach (G4, stdlib-scoping case) — a NetworkService whose
+// Create handler genuinely calls into the standard library
+// (fmt.Sprintf with a %v verb, which RTA over-approximates into the
+// reflect / strconv / sync stdlib packages). The anchor's reachable-set
+// therefore contains source files OUTSIDE the fixture repository —
+// under GOROOT/src — exactly the shape the real kacho-vpc repo
+// exhibits and the minimal empty-handler C3 fixtures never reproduce.
+//
+// It exists so the G4 determinism test can assert that AnchorHash
+// scopes its digest to files UNDER repoRoot: a hash that fed the
+// GOROOT-resident stdlib files in would depend on the toolchain
+// install path and Go version, breaking G4's machine-independence
+// guarantee. The note carries the FreshSHA sentinel so an arch-audit
+// run can resolve it to a genuine hash.
+func SpecC3StdlibReach() Spec {
+	s := grpcServiceBase("example.com/c3g4std", []string{"Create"})
+	s.Notes = []NoteSpec{{
+		File: "network-lifecycle.md", Repo: "c3g4std",
+		RPCAnchors: []string{"kacho.cloud.vpc.v1.NetworkService/Create"},
+		SourceSHA:  FreshSHA,
+		Body: "# Network lifecycle\n\n" +
+			"This L2 note anchors NetworkService/Create, whose handler calls\n" +
+			"into the standard library — its reachable-set spans GOROOT files.\n" +
+			"C3's freshness hash must still scope to in-repo files only.\n",
+	}}
+	s.Files = map[string]string{
+		"internal/handler/handler.go": c3StdlibHandlerSource("example.com/c3g4std"),
+		"internal/repo/repo.go":       c3RepoSource("c3g4std", "C3-G4-STD"),
+	}
+	return s
+}
+
+// c3StdlibHandlerSource renders a NetworkService handler whose Create
+// reaches both repo.Insert AND the standard library: fmt.Sprintf with a
+// %v verb forces RTA to over-approximate interface dispatch into the
+// reflect / strconv stdlib packages, so the anchor's reachable-set
+// contains GOROOT-resident source files. This is the fixture shape that
+// reproduces the AnchorHash absolute-path defect on a real repo.
+func c3StdlibHandlerSource(module string) string {
+	return "// Package handler implements the NetworkService gRPC handler of the\n" +
+		"// C3-G4-STD fixture. Create reaches repo.Insert AND the standard\n" +
+		"// library (fmt), so its reachable-set spans GOROOT source files.\n" +
+		"package handler\n\n" +
+		"import (\n\t\"fmt\"\n\n\t\"" + module + "/internal/repo\"\n)\n\n" +
+		"// Handler implements pb.NetworkServiceServer.\n" +
+		"type Handler struct {\n\trepo *repo.Repo\n}\n\n" +
+		"// New returns a fresh Handler wired to a repo.\n" +
+		"func New() *Handler { return &Handler{repo: repo.New()} }\n\n" +
+		"// Create handles the Create RPC. It calls fmt.Sprintf — pulling\n" +
+		"// stdlib files into its reachable-set — then reaches repo.Insert.\n" +
+		"func (h *Handler) Create() {\n" +
+		"\t_ = fmt.Sprintf(\"network %v created\", h.repo)\n" +
+		"\th.repo.Insert()\n}\n"
+}
+
 // c3HandlerSource renders a NetworkService handler whose Create reaches
 // a repo.Insert — the reachable-set the C3 hash is computed over.
 func c3HandlerSource(module, fixture string) string {

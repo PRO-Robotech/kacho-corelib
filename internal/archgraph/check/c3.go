@@ -115,15 +115,23 @@ func CheckC3(repoRoot string, notes []*note.Note, g *reach.Graph) Result {
 //     name) in g.Sets; collect the union of all those sets' Files. An
 //     anchor whose symbol is not a graph key (a stale anchor, or a
 //     non-RPC/non-worker anchor) contributes nothing.
-//  2. Convert every file path to a slash-separated path relative to
-//     repoRoot, and sort the relative paths. Hashing relative paths,
-//     not the absolute paths reach records, makes the digest
-//     independent of where the repository is checked out; sorting makes
-//     it independent of call-graph traversal and map-iteration order.
+//  2. Drop every file that does not lie under repoRoot. reach records
+//     whole-program reachable-sets — RTA transitively descends into the
+//     standard library and module-cache dependencies — so the raw set
+//     contains GOROOT- and GOMODCACHE-resident files. C3's freshness
+//     hash answers "did the code of *this* repository change", so
+//     dependency and toolchain sources are outside its mandate; hashing
+//     them would also tie source_sha to the toolchain install path and
+//     Go version. Then convert each surviving path to a slash-separated
+//     path relative to repoRoot and sort. Hashing repo-relative paths
+//     makes the digest independent of where the repository is checked
+//     out; sorting makes it independent of traversal and map order.
 //  3. Feed each (relative-path, file-content) pair into a single SHA-256
 //     digest, each component length-prefixed so no two distinct file
 //     sets can collide by concatenation. A file that cannot be read
 //     contributes empty content rather than aborting the hash.
+//
+// Step 2's file selection is exposed standalone as AnchorHashFiles.
 //
 // The returned digest is the lower-case hex SHA-256. A note with no
 // reachable-set files at all (every anchor stale, or anchors empty)
@@ -134,13 +142,7 @@ func CheckC3(repoRoot string, notes []*note.Note, g *reach.Graph) Result {
 // (and test fixtures) call it to record a correct source_sha — neither
 // reimplements the digest.
 func AnchorHash(repoRoot string, n *note.Note, g *reach.Graph) string {
-	files := anchorReachableFiles(n, g)
-
-	rels := make([]string, 0, len(files))
-	for _, abs := range files {
-		rels = append(rels, relFilePath(repoRoot, abs))
-	}
-	sort.Strings(rels)
+	rels := AnchorHashFiles(repoRoot, n, g)
 
 	h := sha256.New()
 	for _, rel := range rels {
@@ -155,6 +157,44 @@ func AnchorHash(repoRoot string, n *note.Note, g *reach.Graph) string {
 		writeHashChunk(h, content)
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// AnchorHashFiles returns the exact, deterministically sorted list of
+// repository-relative (slash-separated) file paths AnchorHash feeds
+// into its digest for note n — the introspection counterpart of
+// AnchorHash, exposed so a caller (and the C3 freshness tests) can see
+// *which* files a note's source_sha is computed over without recomputing
+// the digest.
+//
+// Every returned path is repository-relative and lies under repoRoot:
+// the reachable-set reach records is whole-program — RTA transitively
+// descends into the standard library and module-cache dependencies, so
+// reach.ReachableSet.Files legitimately contains GOROOT- and
+// GOMODCACHE-resident files. Those are deliberately dropped here: C3's
+// freshness hash answers "did the code of *this* repository under the
+// note's anchors change", and the source of a dependency or the Go
+// toolchain is outside that mandate. Hashing them would also make the
+// digest depend on the toolchain install path and the Go version,
+// breaking the machine-independence guarantee (sub-phase 4.0 §12.4 / G4).
+func AnchorHashFiles(repoRoot string, n *note.Note, g *reach.Graph) []string {
+	files := anchorReachableFiles(n, g)
+
+	rels := make([]string, 0, len(files))
+	for _, abs := range files {
+		rel, inRepo := repoRelPath(repoRoot, abs)
+		if !inRepo {
+			// A GOROOT- / GOMODCACHE-resident file: stdlib or a
+			// module-cache dependency RTA transitively descended into.
+			// It is outside C3's mandate (the freshness hash is about
+			// *this* repository's code) and, if hashed, would tie
+			// source_sha to the toolchain install path and Go version.
+			// Drop it.
+			continue
+		}
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	return rels
 }
 
 // anchorReachableFiles returns the union of the reachable-set files of
@@ -200,22 +240,40 @@ func writeHashChunk(h interface{ Write([]byte) (int, error) }, chunk []byte) {
 
 // relNotePath renders a note's path repository-relative and
 // slash-separated, so a C3 finding reads "docs/arch/network-lifecycle.md"
-// regardless of the repository's checkout location.
+// regardless of the repository's checkout location. A note always lives
+// inside the repository it documents, so the in-repo case is the only
+// one expected; the absolute-path fallback exists solely so a
+// degenerate input cannot panic a finding's display string.
 func relNotePath(repoRoot string, n *note.Note) string {
-	return relFilePath(repoRoot, n.Path())
+	if rel, inRepo := repoRelPath(repoRoot, n.Path()); inRepo {
+		return rel
+	}
+	return filepath.ToSlash(n.Path())
 }
 
-// relFilePath renders abs as a slash-separated path relative to
-// repoRoot. A path that cannot be made relative (a different volume, or
-// outside the repository) falls back to its slash-cleaned absolute
-// form — a degenerate case that keeps the hash defined rather than
-// panicking.
-func relFilePath(repoRoot, abs string) string {
-	if rel, err := filepath.Rel(repoRoot, abs); err == nil &&
-		!strings.HasPrefix(rel, "..") {
-		return filepath.ToSlash(rel)
+// repoRelPath reports whether abs lies inside the repository rooted at
+// repoRoot and, if so, returns its slash-separated repository-relative
+// form.
+//
+// A file is "in repo" iff filepath.Rel(repoRoot, abs) succeeds and the
+// result has no ".." prefix — i.e. abs does not escape repoRoot (and is
+// not on a different volume). reach.Compute records absolute paths
+// spanning the whole analysed program — including GOROOT-resident
+// stdlib files and GOMODCACHE-resident dependency files — so this
+// predicate is the single choke-point that separates "code of this
+// repository" (which C3's freshness hash is about) from everything
+// outside its mandate. AnchorHashFiles drops every abs for which this
+// returns false, which is why the freshness digest never depends on the
+// toolchain install path or Go version.
+func repoRelPath(repoRoot, abs string) (string, bool) {
+	rel, err := filepath.Rel(repoRoot, abs)
+	if err != nil {
+		return "", false
 	}
-	return filepath.ToSlash(abs)
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
 }
 
 // c3Summary builds the one-line C3 verdict.
