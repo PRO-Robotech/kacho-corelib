@@ -191,6 +191,40 @@ func TestWrite_AtomicNoTempLeftover(t *testing.T) {
 	}
 }
 
+func TestWrite_PreservesFileMode(t *testing.T) {
+	// A note checked in with mode 0644 must keep 0644 after a write-back:
+	// atomicWrite creates its temp file 0600, so without an explicit
+	// Chmod the rename would silently narrow the destination's mode.
+	path := copyFixture(t, "valid_minimal.md")
+	require.NoError(t, os.Chmod(path, 0o644))
+
+	n, err := note.Parse(path)
+	require.NoError(t, err)
+	n.SetStatus("implemented")
+	require.NoError(t, n.Write())
+
+	fi, err := os.Stat(path)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o644), fi.Mode().Perm(),
+		"write-back must preserve the original file mode")
+}
+
+func TestWriteTo_NewFileDefaultMode(t *testing.T) {
+	// WriteTo to a path that does not yet exist must produce a 0644
+	// file, not the 0600 that os.CreateTemp would leave.
+	n, err := note.Parse(filepath.Join("testdata", "notes", "valid_minimal.md"))
+	require.NoError(t, err)
+	n.SetStatus("partial")
+
+	dst := filepath.Join(t.TempDir(), "new.md")
+	require.NoError(t, n.WriteTo(dst))
+
+	fi, err := os.Stat(dst)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o644), fi.Mode().Perm(),
+		"a freshly written note must default to mode 0644")
+}
+
 func TestWriteTo_DoesNotTouchOriginal(t *testing.T) {
 	src := filepath.Join("testdata", "notes", "valid_minimal.md")
 	orig, err := os.ReadFile(src)

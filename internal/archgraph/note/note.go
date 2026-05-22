@@ -114,6 +114,13 @@ func (n *Note) Body() string { return n.body }
 // text is rewritten — so a subsequent Write keeps every other key,
 // value, comment and the body byte-identical. SetStatus is idempotent:
 // setting the current value rewrites the bytes to the same content.
+//
+// SetStatus assumes "status" is a single-line plain (unquoted) scalar on
+// its own column-0 line — which it always is for archgraph's enum values
+// (implemented | partial | planned). It is not designed for a status
+// expressed as a multi-line, quoted, flow or block scalar; such a value
+// would be replaced with a plain scalar on a single line. This is a safe
+// assumption for archgraph-authored notes and is not separately enforced.
 func (n *Note) SetStatus(status string) {
 	n.front = replaceStatusScalar(n.front, status)
 	n.Status = status
@@ -236,10 +243,17 @@ func (n *Note) WriteTo(path string) error {
 	return nil
 }
 
+// defaultNoteMode is the file mode given to a note created from scratch
+// (no pre-existing file at the destination). When the destination
+// already exists its own mode is preserved instead.
+const defaultNoteMode os.FileMode = 0o644
+
 // atomicWrite writes data to path atomically: it creates a temp file in
-// the destination directory, writes and fsyncs it, then renames it over
-// path. On any failure before the rename the temp file is removed, so no
-// partial output is observable at path.
+// the destination directory, writes and fsyncs it, chmods it to match
+// the destination's mode (or defaultNoteMode for a new file), then
+// renames it over path and fsyncs the parent directory so the rename is
+// crash-durable. On any failure before the rename the temp file is
+// removed, so no partial output is observable at path.
 func atomicWrite(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".archgraph-note-*.tmp")
@@ -260,6 +274,19 @@ func atomicWrite(path string, data []byte) error {
 		cleanup()
 		return err
 	}
+
+	// os.CreateTemp makes the temp file 0600; align it with the mode the
+	// destination should have so the rename does not silently narrow an
+	// existing note's permissions.
+	mode := defaultNoteMode
+	if fi, statErr := os.Stat(path); statErr == nil {
+		mode = fi.Mode().Perm()
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		cleanup()
+		return err
+	}
+
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpName)
 		return err
@@ -267,6 +294,14 @@ func atomicWrite(path string, data []byte) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		_ = os.Remove(tmpName)
 		return err
+	}
+
+	// fsync the parent directory so the new directory entry (the rename)
+	// survives a crash; without it the file contents are durable but the
+	// rename itself may not be.
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	return nil
 }
@@ -327,6 +362,13 @@ func splitFrontmatter(raw []byte) (front []byte, body string, ok bool) {
 // around them are kept byte-for-byte, so an unchanged value is a no-op
 // and a changed one disturbs nothing else. If no "status:" key is found
 // a new "status: <value>" line is appended.
+//
+// It assumes the existing status value is a single-line plain scalar:
+// the whole "status:" line is replaced, so a status spread over multiple
+// lines (block/flow scalar) or wrapped in quotes is not preserved in its
+// original form. archgraph status values are the plain enum identifiers
+// implemented | partial | planned, for which this always holds; the
+// assumption is intentional and not validated here.
 func replaceStatusScalar(front []byte, value string) []byte {
 	lines := strings.SplitAfter(string(front), "\n")
 	for i, ln := range lines {
