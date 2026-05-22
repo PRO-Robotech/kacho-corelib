@@ -103,9 +103,9 @@ func SpecReconcilerCron() Spec {
 // archgraph must not inventory it but must emit a hint. Used by B5.
 func SpecWorkerNonConventional() Spec {
 	return Spec{
-		Module:   "example.com/svcworkernonconv",
-		NoMain:   true,
-		Files:    map[string]string{"cmd/svc/main.go": nonConventionalMain("svcworkernonconv")},
+		Module: "example.com/svcworkernonconv",
+		NoMain: true,
+		Files:  map[string]string{"cmd/svc/main.go": nonConventionalMain("svcworkernonconv")},
 	}
 }
 

@@ -2,6 +2,11 @@
 *.test
 coverage.out
 /archgraph
+/bin/
+# archgraph self-test output: `make arch-gen` regenerates the L4 inventory
+# of kacho-corelib itself. kacho-corelib runs no CI drift-gate, so the
+# artifact is transient — committed copies live in service repos instead.
+/docs/arch/generated/
 .idea/
 .vscode/
 .DS_Store

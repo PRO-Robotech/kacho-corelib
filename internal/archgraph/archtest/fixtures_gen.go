@@ -100,9 +100,10 @@ func (r *NetworkRepo) encodeRow() {}
 `
 
 // SpecGenBasic is the standard arch-gen fixture (group D, scenarios
-// D1/D2/D4/D5/D6): one NetworkService with a Create RPC anchored by a
+// D1/D2/D3/D4/D5/D6): one NetworkService with a Create RPC anchored by a
 // single L2 note, a reachable chain of exported functions and a domain
-// package with exported types, fields and constants.
+// package with exported types, fields and constants. D3 mutates the
+// handler via GenHandlerSourceWithEnrich to assert the artifact updates.
 func SpecGenBasic() Spec {
 	s := grpcServiceBase("example.com/genbasic", []string{"Create"})
 	s.Notes = []NoteSpec{{
