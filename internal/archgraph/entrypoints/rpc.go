@@ -124,13 +124,14 @@ func resolveRegisterCall(
 
 	serviceName, methods, err := readServiceDesc(lit)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w for %s: %s", ErrUnresolvedFQN, fn.Name(), err)
+		return nil, nil, fmt.Errorf("%w for %s: %w", ErrUnresolvedFQN, fn.Name(), err)
 	}
 
 	// Resolve the concrete handler type from the call's second argument.
-	// methodLookupType is the named type whose method set carries the
-	// per-method handler implementations; it is nil when the handler is
-	// passed behind an interface or constructed unresolvably.
+	// handlerType is the named type whose method set carries the
+	// per-method handler implementations, and handlerPkg its owning
+	// package; handlerType is nil when the handler is passed behind an
+	// interface or constructed unresolvably.
 	handlerType, handlerPkg := handlerArgType(call, mp.TypesInfo)
 
 	var hints []Hint
