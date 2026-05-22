@@ -20,8 +20,13 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/tools/go/packages"
 
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/archtest"
+	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/check"
+	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/entrypoints"
+	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/note"
+	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/reach"
 )
 
 // buildOnce builds the archgraph binary a single time for the whole
@@ -122,6 +127,56 @@ func asExit(err error, target **exec.ExitError) bool {
 func fixture(t *testing.T, spec archtest.Spec) string {
 	t.Helper()
 	return archtest.BuildRepo(t, spec)
+}
+
+// fixtureFresh builds a fixture and then resolves every L2 note carrying
+// the archtest.FreshSHA sentinel to a genuine C3 freshness hash. An
+// arch-audit run evaluates C1, C2 and C3 together, so a fixture meant to
+// pass arch-audit must have its notes recorded as C3-fresh — that is the
+// second phase of the FreshSHA two-phase build.
+func fixtureFresh(t *testing.T, spec archtest.Spec) string {
+	t.Helper()
+	root := archtest.BuildRepo(t, spec)
+	resolveFreshNotesAt(t, root)
+	return root
+}
+
+// resolveFreshNotesAt rewrites every FreshSHA-sentinel note under root
+// with the genuine hash of its anchors' reachable-set. It reloads the
+// repository's packages, recomputes the reachability graph and hashes
+// via check.AnchorHash — the exact computation arch-audit's C3 will
+// perform — so the recorded source_sha matches. It is called both after
+// the initial build and again after any in-place mutation of a fixture
+// whose reachable-set files changed (the F6 continuation).
+func resolveFreshNotesAt(t *testing.T, root string) {
+	t.Helper()
+	g := graphAt(t, root)
+	archtest.ResolveFreshNotes(t, root, func(notePath string) string {
+		n, err := note.Parse(notePath)
+		require.NoError(t, err, "parsing sentinel note %s", notePath)
+		return check.AnchorHash(root, n, g)
+	})
+}
+
+// graphAt loads the module at root and computes its reachability graph —
+// the input check.AnchorHash needs to hash a note's reachable-set.
+func graphAt(t *testing.T, root string) *reach.Graph {
+	t.Helper()
+	cfg := &packages.Config{
+		Mode: packages.NeedName | packages.NeedFiles | packages.NeedImports |
+			packages.NeedDeps | packages.NeedTypes | packages.NeedSyntax |
+			packages.NeedTypesInfo,
+		Dir:   root,
+		Tests: false,
+		Env:   append(os.Environ(), "GOTOOLCHAIN=local"),
+	}
+	pkgs, err := packages.Load(cfg, "./...")
+	require.NoError(t, err, "loading fixture at %s", root)
+	inv, err := entrypoints.Discover(pkgs)
+	require.NoError(t, err, "discovering entry-points at %s", root)
+	g, err := reach.Compute(pkgs, inv)
+	require.NoError(t, err, "computing reachability at %s", root)
+	return g
 }
 
 // snapshotTree records the relative paths of every file under root.
@@ -247,11 +302,12 @@ func Test_4_0_A5_CompileErrorFailFast(t *testing.T) {
 // entry-point is anchored exactly once prints the C1 PASS summary and
 // exits 0.
 func Test_4_0_E1_C1PassExitZero(t *testing.T) {
-	res := run(t, fixture(t, archtest.SpecC1Pass()), "arch-audit")
+	res := run(t, fixtureFresh(t, archtest.SpecC1Pass()), "arch-audit")
 	require.Equal(t, 0, res.exitCode,
 		"a complete repo must pass C1; stderr=%s", res.stderr)
 	require.Contains(t, res.stdout,
 		"C1 completeness: PASS (3/3 entry-points anchored)")
+	require.Contains(t, res.stdout, "C3 freshness: PASS")
 }
 
 // Test_4_0_E2_C1FailUndocumentedExitNonZero: an undocumented
@@ -313,21 +369,23 @@ func Test_4_0_E5_C1NonConventionalWorkerHint(t *testing.T) {
 // list does not break C1 — arch-audit still passes and exits 0 when the
 // other notes cover every entry-point.
 func Test_4_0_E6_C1EmptyAnchorsIgnored(t *testing.T) {
-	res := run(t, fixture(t, archtest.SpecC1EmptyAnchors()), "arch-audit")
+	res := run(t, fixtureFresh(t, archtest.SpecC1EmptyAnchors()), "arch-audit")
 	require.Equal(t, 0, res.exitCode,
 		"an empty-anchors note must not fail C1; stderr=%s", res.stderr)
 	require.Contains(t, res.stdout,
 		"C1 completeness: PASS (2/2 entry-points anchored)")
+	require.Contains(t, res.stdout, "C3 freshness: PASS")
 }
 
 // Test_4_0_F1_C2PassExitZero: arch-audit on a repo whose every exported
 // symbol is reachable prints the C2 PASS summary and exits 0.
 func Test_4_0_F1_C2PassExitZero(t *testing.T) {
-	res := run(t, fixture(t, archtest.SpecC2Pass()), "arch-audit")
+	res := run(t, fixtureFresh(t, archtest.SpecC2Pass()), "arch-audit")
 	require.Equal(t, 0, res.exitCode,
 		"a repo with no dead code must pass C2; stderr=%s", res.stderr)
 	require.Contains(t, res.stdout,
 		"C2 dead-code: PASS (0 unreachable exported symbols)")
+	require.Contains(t, res.stdout, "C3 freshness: PASS")
 }
 
 // Test_4_0_F2_C2FailUnreachableExitNonZero: an unreachable exported
@@ -348,7 +406,7 @@ func Test_4_0_F2_C2FailUnreachableExitNonZero(t *testing.T) {
 // makes arch-audit print the kept-symbol line; C2 does not contribute a
 // non-zero exit.
 func Test_4_0_F3_C2KeepSuppresses(t *testing.T) {
-	res := run(t, fixture(t, archtest.SpecC2Keep()), "arch-audit")
+	res := run(t, fixtureFresh(t, archtest.SpecC2Keep()), "arch-audit")
 	require.Equal(t, 0, res.exitCode,
 		"a kept symbol must not fail the audit; stderr=%s", res.stderr)
 	require.Contains(t, res.stdout, "C2 dead-code: PASS")
@@ -374,7 +432,7 @@ func Test_4_0_F4_C2KeepWithoutReasonRejected(t *testing.T) {
 // reachability root — arch-audit passes C2 because nothing transitively
 // reachable from the kept BuildClientSDK is reported as dead.
 func Test_4_0_F5_C2KeepIsTransitive(t *testing.T) {
-	res := run(t, fixture(t, archtest.SpecC2KeepTransitive()), "arch-audit")
+	res := run(t, fixtureFresh(t, archtest.SpecC2KeepTransitive()), "arch-audit")
 	require.Equal(t, 0, res.exitCode,
 		"keep transitivity must keep C2 passing; stderr=%s", res.stderr)
 	require.Contains(t, res.stdout, "C2 dead-code: PASS")
@@ -411,7 +469,13 @@ func Test_4_0_F6_C2ReflectionKeepContinuation(t *testing.T) {
 	require.NotEqual(t, string(src), annotated, "annotation must be injected")
 	require.NoError(t, os.WriteFile(regFile, []byte(annotated), 0o644))
 
-	// Phase 2 — after annotation: C2 passes.
+	// The annotation revives registry.go into the keep-root reachable-set,
+	// so the L2 note's freshness hash changes. Re-resolve its FreshSHA
+	// sentinel against the mutated tree before phase 2, so C3 — which
+	// arch-audit now also evaluates — does not spuriously fail.
+	resolveFreshNotesAt(t, work)
+
+	// Phase 2 — after annotation: C2 (and C3) pass.
 	after := run(t, work, "arch-audit")
 	require.Equal(t, 0, after.exitCode,
 		"after the keep annotation C2 must pass; stderr=%s", after.stderr)

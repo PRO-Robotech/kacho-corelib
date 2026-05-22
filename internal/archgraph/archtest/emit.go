@@ -139,13 +139,28 @@ func workerSource(w WorkerSpec) string {
 
 // noteSource renders an L2 architecture note: YAML frontmatter delimited by
 // --- lines followed by a Markdown body.
+//
+// source_sha resolution:
+//
+//   - SourceSHA "" on a non-planned note → the default "a1b2c3d", so a
+//     plain C1/E-style fixture need not spell a SHA out;
+//   - SourceSHA "" on a planned note → an empty source_sha ("");
+//   - SourceSHA == EmptySHA → an empty source_sha ("") on a note that
+//     is *not* planned — the G5 missing-source_sha case, where an
+//     anchored note deliberately records no SHA;
+//   - any other SourceSHA value (including FreshSHA) → written verbatim.
 func noteSource(n NoteSpec) string {
 	status := n.Status
 	if status == "" {
 		status = "implemented"
 	}
 	sha := n.SourceSHA
-	if sha == "" && n.Status != "planned" {
+	switch {
+	case sha == EmptySHA:
+		// Explicit request for an empty source_sha on an anchored,
+		// non-planned note (scenario G5).
+		sha = ""
+	case sha == "" && n.Status != "planned":
 		sha = "a1b2c3d"
 	}
 

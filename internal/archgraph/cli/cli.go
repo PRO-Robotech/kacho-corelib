@@ -34,6 +34,7 @@ import (
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/check"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/entrypoints"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/note"
+	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/reach"
 )
 
 // Exit codes form part of archgraph's stable CLI contract.
@@ -142,9 +143,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 const archNotesDir = "docs/arch"
 
 // runAudit runs the blocking architecture checks over the discovered
-// inventory and returns the process exit code. C1 (completeness) and C2
-// (dead-code) are wired; C3 and the full combined-verdict orchestration
-// arrive in later tasks. arch-audit exits non-zero if any check fails.
+// inventory and returns the process exit code. C1 (completeness), C2
+// (dead-code) and C3 (freshness) are wired; the full combined-verdict
+// orchestration arrives in a later task. arch-audit exits non-zero if
+// any check fails.
 func runAudit(
 	repoRoot string,
 	pkgs []*packages.Package,
@@ -167,10 +169,20 @@ func runAudit(
 	}
 	printResult(stdout, c2)
 
+	// C3 freshness needs the reachability graph: it hashes the
+	// reachable-set files under each note's anchors.
+	g, err := reach.Compute(pkgs, inv)
+	if err != nil {
+		writeString(stderr, err.Error()+"\n")
+		return ExitStartupError
+	}
+	c3 := check.CheckC3(repoRoot, notes, g)
+	printResult(stdout, c3)
+
 	// arch-audit fails if any wired check fails. A SKIP verdict (a
 	// library repo's C2) carries Passed=true, so it never contributes a
 	// non-zero exit.
-	if !c1.Passed || !c2.Passed {
+	if !c1.Passed || !c2.Passed || !c3.Passed {
 		return ExitCheckFailed
 	}
 	return ExitOK

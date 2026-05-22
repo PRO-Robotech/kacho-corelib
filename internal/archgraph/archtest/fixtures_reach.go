@@ -8,11 +8,15 @@ package archtest
 // shared scaffold: go.mod, grpcstub, the pb stub and main.go wiring.
 
 // oneCreateNote is the standard single-RPC L2 note shared by every C2
-// fixture (so C1 passes and C2 can be exercised).
+// fixture (so C1 passes and C2 can be exercised). Its source_sha is the
+// FreshSHA sentinel: an arch-audit run also evaluates C3, so the note
+// must be resolvable to a genuine freshness hash. C2's own unit test
+// ignores source_sha.
 func oneCreateNote(repo string) NoteSpec {
 	return NoteSpec{
 		File: "network-lifecycle.md", Repo: repo,
 		RPCAnchors: []string{"kacho.cloud.vpc.v1.NetworkService/Create"},
+		SourceSHA:  FreshSHA,
 		Body: "# Network lifecycle\n\n" +
 			"This L2 note anchors the single NetworkService Create RPC, so C1\n" +
 			"completeness passes and C2 dead-code can be exercised.\n",

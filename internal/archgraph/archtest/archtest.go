@@ -140,8 +140,12 @@ type NoteSpec struct {
 	// "planned". Defaults to "implemented".
 	Status string
 
-	// SourceSHA is the note's frontmatter source_sha. Defaults to
-	// "a1b2c3d"; set it to "" for a planned note with no source.
+	// SourceSHA is the note's frontmatter source_sha. A bare "" on a
+	// non-planned note defaults to "a1b2c3d"; "" on a planned note
+	// stays empty. Two sentinels override that: FreshSHA marks a note
+	// whose source_sha the C3 test rewrites with the genuine
+	// reachable-set hash; EmptySHA forces an empty source_sha on an
+	// anchored, non-planned note (the G5 missing-source_sha case).
 	SourceSHA string
 
 	// Body, when non-empty, replaces the default Markdown body emitted

@@ -22,6 +22,10 @@ func SpecC1Pass() Spec {
 				"kacho.cloud.vpc.v1.NetworkService/Delete",
 			},
 			WorkerAnchors: []string{"NetworkOutboxWorker"},
+			// FreshSHA so the fixture also passes C3 in an arch-audit
+			// run; the CLI/C3 tests resolve it to a genuine hash. C1's
+			// own unit test ignores source_sha entirely.
+			SourceSHA: FreshSHA,
 		}},
 	}
 }
@@ -124,6 +128,8 @@ func SpecC1EmptyAnchors() Spec {
 					"kacho.cloud.vpc.v1.NetworkService/Create",
 					"kacho.cloud.vpc.v1.NetworkService/Delete",
 				},
+				// FreshSHA so the fixture also passes C3 under arch-audit.
+				SourceSHA: FreshSHA,
 			},
 			{
 				File: "network-planned.md", Repo: "c1e6",
