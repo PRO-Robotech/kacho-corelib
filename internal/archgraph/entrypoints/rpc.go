@@ -15,9 +15,13 @@ import (
 // discoverRPC finds every gRPC entry-point registered by the main
 // package mp. For each RegisterXxxServer call it resolves the proto
 // service FQN and method list through the registered grpc.ServiceDesc,
-// then emits one rpc EntryPoint per method.
-func discoverRPC(mp *packages.Package, idx *index) ([]EntryPoint, error) {
-	var entries []EntryPoint
+// then emits one rpc EntryPoint per method, rooted at the concrete
+// handler type's method (see resolveRegisterCall).
+func discoverRPC(mp *packages.Package, idx *index) ([]EntryPoint, []Hint, error) {
+	var (
+		entries []EntryPoint
+		hints   []Hint
+	)
 
 	for _, file := range mp.Syntax {
 		var walkErr error
@@ -33,19 +37,20 @@ func discoverRPC(mp *packages.Package, idx *index) ([]EntryPoint, error) {
 			if fn == nil || !isRegisterServerName(fn.Name()) {
 				return true
 			}
-			eps, err := resolveRegisterCall(fn, idx)
+			eps, hs, err := resolveRegisterCall(fn, call, mp, idx)
 			if err != nil {
 				walkErr = err
 				return false
 			}
 			entries = append(entries, eps...)
+			hints = append(hints, hs...)
 			return true
 		})
 		if walkErr != nil {
-			return nil, walkErr
+			return nil, nil, walkErr
 		}
 	}
-	return entries, nil
+	return entries, hints, nil
 }
 
 // isRegisterServerName reports whether name has the protoc-gen-go-grpc
@@ -78,51 +83,132 @@ func calleeFunc(call *ast.CallExpr, info *types.Info) *types.Func {
 // resolveRegisterCall follows a RegisterXxxServer function into its
 // body, finds the grpc.ServiceDesc it registers, and emits one rpc
 // EntryPoint per method declared on that descriptor.
-func resolveRegisterCall(fn *types.Func, idx *index) ([]EntryPoint, error) {
+//
+// call is the RegisterXxxServer(server, handler) call site in the main
+// package mp. Its second argument is the concrete handler value: its
+// static type is the handler implementation, and each rpc EntryPoint is
+// rooted at that type's method — the real business logic Task 4 must
+// walk for reachability (C2 dead-code). When the handler type cannot be
+// resolved to a concrete type carrying the method, the EntryPoint falls
+// back to the RegisterXxxServer function as Root and a Hint is emitted.
+func resolveRegisterCall(
+	fn *types.Func,
+	call *ast.CallExpr,
+	mp *packages.Package,
+	idx *index,
+) ([]EntryPoint, []Hint, error) {
 	decl := idx.funcDecls[fn]
 	if decl == nil || decl.Body == nil {
-		return nil, fmt.Errorf("%w for %s: registration function body unavailable",
+		return nil, nil, fmt.Errorf("%w for %s: registration function body unavailable",
 			ErrUnresolvedFQN, fn.Name())
 	}
 	pkg := idx.funcPkg[fn]
 
 	descObj := findServiceDescObject(decl, pkg.TypesInfo)
 	if descObj == nil {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"%w for %s: no RegisterService(&ServiceDesc, ...) call in body",
 			ErrUnresolvedFQN, fn.Name())
 	}
 
 	site, ok := idx.varSpecs[descObj]
 	if !ok || site.idx >= len(site.spec.Values) {
-		return nil, fmt.Errorf("%w for %s: ServiceDesc %s declaration unavailable",
+		return nil, nil, fmt.Errorf("%w for %s: ServiceDesc %s declaration unavailable",
 			ErrUnresolvedFQN, fn.Name(), descObj.Name())
 	}
 	lit, ok := site.spec.Values[site.idx].(*ast.CompositeLit)
 	if !ok {
-		return nil, fmt.Errorf("%w for %s: ServiceDesc %s is not a composite literal",
+		return nil, nil, fmt.Errorf("%w for %s: ServiceDesc %s is not a composite literal",
 			ErrUnresolvedFQN, fn.Name(), descObj.Name())
 	}
 
 	serviceName, methods, err := readServiceDesc(lit)
 	if err != nil {
-		return nil, fmt.Errorf("%w for %s: %s", ErrUnresolvedFQN, fn.Name(), err)
+		return nil, nil, fmt.Errorf("%w for %s: %s", ErrUnresolvedFQN, fn.Name(), err)
 	}
 
+	// Resolve the concrete handler type from the call's second argument.
+	// methodLookupType is the named type whose method set carries the
+	// per-method handler implementations; it is nil when the handler is
+	// passed behind an interface or constructed unresolvably.
+	handlerType, handlerPkg := handlerArgType(call, mp.TypesInfo)
+
+	var hints []Hint
 	entries := make([]EntryPoint, 0, len(methods))
 	for _, m := range methods {
+		root, ok := lookupHandlerMethod(handlerType, handlerPkg, m)
+		if !ok {
+			// The handler type did not statically resolve to a concrete
+			// type carrying method m. Fall back to the RegisterXxxServer
+			// function as Root and surface a hint for arch-audit so the
+			// unresolved root can be reviewed by a human.
+			root = fn
+			pos := mp.Fset.Position(call.Pos())
+			hints = append(hints, Hint{
+				Message: fmt.Sprintf(
+					"hint: rpc handler root unresolved for %s/%s at %s:%d — "+
+						"reachability rooted at %s registration plumbing instead",
+					serviceName, m, pos.Filename, pos.Line, fn.Name()),
+			})
+		}
 		entries = append(entries, EntryPoint{
 			Kind: KindRPC,
 			Name: serviceName + "/" + m,
-			// The reachability root of an rpc entry-point is the
-			// RegisterXxxServer function: Task 4 walks from it into the
-			// registered handler implementation. fn is stable and always
-			// resolvable, unlike the per-method handler which the stub
-			// references only as an unexported package-level symbol.
-			Root: fn,
+			// The reachability root is the concrete handler type's
+			// method — the real RPC business logic Task 4 walks for
+			// dead-code analysis (or, on the fallback path above, the
+			// RegisterXxxServer function).
+			Root: root,
 		})
 	}
-	return entries, nil
+	return entries, hints, nil
+}
+
+// handlerArgType resolves the static type of the handler value passed
+// as the second argument of a RegisterXxxServer(server, handler) call.
+// It returns the named type carrying the handler's method set and the
+// package that named type belongs to, or (nil, nil) when the handler
+// argument is absent or its type is not a (pointer to a) named type
+// (e.g. an interface value or an unresolvable inline construction).
+func handlerArgType(call *ast.CallExpr, info *types.Info) (*types.Named, *types.Package) {
+	if info == nil || len(call.Args) < 2 {
+		return nil, nil
+	}
+	tv, ok := info.Types[call.Args[1]]
+	if !ok || tv.Type == nil {
+		return nil, nil
+	}
+	t := tv.Type
+	if ptr, ok := t.(*types.Pointer); ok {
+		t = ptr.Elem()
+	}
+	named, ok := t.(*types.Named)
+	if !ok {
+		return nil, nil
+	}
+	return named, named.Obj().Pkg()
+}
+
+// lookupHandlerMethod finds the *types.Func for method name on the
+// concrete handler type. It probes both the value and pointer method
+// sets via types.LookupFieldOrMethod. It returns (nil, false) when the
+// handler type is nil or carries no such method.
+func lookupHandlerMethod(
+	handlerType *types.Named,
+	handlerPkg *types.Package,
+	name string,
+) (*types.Func, bool) {
+	if handlerType == nil {
+		return nil, false
+	}
+	// addressable=true so pointer-receiver methods are included; gRPC
+	// handlers conventionally use pointer receivers.
+	obj, _, _ := types.LookupFieldOrMethod(handlerType, true, handlerPkg, name)
+	fn, ok := obj.(*types.Func)
+	if !ok {
+		return nil, false
+	}
+	return fn, true
 }
 
 // findServiceDescObject scans a RegisterXxxServer body for a

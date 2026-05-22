@@ -12,6 +12,7 @@ package entrypoints_test
 // self-contained and pins go 1.21 so it loads under GOTOOLCHAIN=local.
 
 import (
+	"go/types"
 	"os"
 	"path/filepath"
 	"sort"
@@ -93,6 +94,84 @@ func Test_4_0_B1_GRPCMethodsByRegister(t *testing.T) {
 	// reachability pass (Task 4) walks the call-graph from it.
 	for _, ep := range inv.Entries {
 		require.NotNil(t, ep.Root, "entry-point %s must carry a root func", ep.Name)
+	}
+}
+
+// rpcRoot returns the root *types.Func of the rpc entry-point with the
+// given canonical name, failing the test when no such entry exists.
+func rpcRoot(t *testing.T, inv *entrypoints.Inventory, name string) *types.Func {
+	t.Helper()
+	for _, ep := range inv.Entries {
+		if ep.Kind == entrypoints.KindRPC && ep.Name == name {
+			require.NotNil(t, ep.Root, "rpc entry-point %s must carry a root", name)
+			return ep.Root
+		}
+	}
+	t.Fatalf("no rpc entry-point named %q in inventory", name)
+	return nil
+}
+
+// receiverTypeName returns the bare name of fn's receiver named type
+// ("NetworkHandler" for `func (h *NetworkHandler) Create()`), or "" when
+// fn is not a method.
+func receiverTypeName(fn *types.Func) string {
+	sig, ok := fn.Type().(*types.Signature)
+	if !ok || sig.Recv() == nil {
+		return ""
+	}
+	t := sig.Recv().Type()
+	if ptr, ok := t.(*types.Pointer); ok {
+		t = ptr.Elem()
+	}
+	if named, ok := t.(*types.Named); ok {
+		return named.Obj().Name()
+	}
+	return ""
+}
+
+// Test_4_0_B1_RPCRootIsHandlerMethod: the reachability root of an rpc
+// entry-point must be the concrete handler type's method (e.g.
+// (*NetworkHandler).Create), NOT the RegisterXxxServer plumbing
+// function. Task 4 walks the call-graph from Root for dead-code (C2)
+// analysis — rooting at RegisterNetworkServiceServer would reach
+// registration plumbing instead of the handler's business logic.
+func Test_4_0_B1_RPCRootIsHandlerMethod(t *testing.T) {
+	pkgs := loadFixture(t, "svc-grpc-basic")
+
+	inv, err := entrypoints.Discover(pkgs)
+	require.NoError(t, err)
+
+	for _, method := range []string{"Create", "Get", "List", "Delete"} {
+		root := rpcRoot(t, inv,
+			"kacho.cloud.vpc.v1.NetworkService/"+method)
+		require.Equal(t, method, root.Name(),
+			"Root must be the handler method %q, not RegisterNetworkServiceServer", method)
+		require.Equal(t, "NetworkHandler", receiverTypeName(root),
+			"Root must be a method of the concrete handler type, "+
+				"not the package-level RegisterXxxServer function")
+	}
+}
+
+// Test_4_0_B2_RPCRootIsHandlerMethodMulti: with two RegisterXxxServer
+// calls handing two distinct concrete handlers, each rpc entry-point's
+// Root resolves to a method of its own handler type.
+func Test_4_0_B2_RPCRootIsHandlerMethodMulti(t *testing.T) {
+	pkgs := loadFixture(t, "svc-grpc-multi")
+
+	inv, err := entrypoints.Discover(pkgs)
+	require.NoError(t, err)
+
+	cases := map[string]struct{ method, recv string }{
+		"kacho.cloud.vpc.v1.NetworkService/Create":              {"Create", "NetworkHandler"},
+		"kacho.cloud.vpc.v1.NetworkService/Get":                 {"Get", "NetworkHandler"},
+		"kacho.cloud.vpc.v1.InternalNetworkService/ReportState": {"ReportState", "InternalNetworkHandler"},
+		"kacho.cloud.vpc.v1.InternalNetworkService/Sweep":       {"Sweep", "InternalNetworkHandler"},
+	}
+	for name, want := range cases {
+		root := rpcRoot(t, inv, name)
+		require.Equal(t, want.method, root.Name(), "Root method for %s", name)
+		require.Equal(t, want.recv, receiverTypeName(root),
+			"Root receiver type for %s", name)
 	}
 }
 

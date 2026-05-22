@@ -109,11 +109,12 @@ func Discover(pkgs []*packages.Package) (*Inventory, error) {
 	inv := &Inventory{IsLibraryRepo: len(mains) == 0}
 
 	for _, mp := range mains {
-		rpcs, err := discoverRPC(mp, idx)
+		rpcs, rpcHints, err := discoverRPC(mp, idx)
 		if err != nil {
 			return nil, err
 		}
 		inv.Entries = append(inv.Entries, rpcs...)
+		inv.Hints = append(inv.Hints, rpcHints...)
 
 		workers, hints := discoverWorkers(mp, idx)
 		inv.Entries = append(inv.Entries, workers...)
