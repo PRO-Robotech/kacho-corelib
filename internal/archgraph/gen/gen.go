@@ -126,6 +126,15 @@ func Generate(
 	exported := collectExportedFuncs(repoRoot, pkgs)
 	names := resolveSSANames(pkgs, inv, exported)
 
+	// repoPkgs is the set of import paths of the repository's own loaded
+	// packages — the scope an L3 call-tree is restricted to. reach records
+	// whole-program reachable-sets (RTA transitively descends into the
+	// standard library and module-cache dependencies), so a raw call-tree
+	// would dump the entire stdlib as documentation noise; an L3 artifact
+	// must show only functions defined in *this* repository (the same
+	// scoping C3's freshness hash applies to its file set).
+	repoPkgs := collectRepoPkgPaths(pkgs)
+
 	// artifacts is the set of file base names arch-gen is about to write —
 	// the input to stale-removal.
 	artifacts := map[string]struct{}{}
@@ -137,7 +146,7 @@ func Generate(
 			continue
 		}
 		base := l3FileName(n)
-		content := renderL3(n, g, exported, names)
+		content := renderL3(n, g, exported, names, repoPkgs)
 		if err := writeArtifact(outDir, base, content); err != nil {
 			return err
 		}
@@ -185,11 +194,20 @@ func l3FileName(n *note.Note) string {
 // deterministically sorted call-tree of every reachable function and the
 // Go signatures of the reachable functions that are exported symbols of
 // this repository.
+//
+// repoPkgs scopes the call-tree: only functions defined in one of the
+// repository's own packages are rendered. RTA's reachable-set spans the
+// whole program — stdlib and module-cache dependencies included — so an
+// unscoped call-tree would dump the entire Go standard library into the
+// artifact (the defect the first real-repo roll-out exposed: a 1.4 MB
+// L3 file). The reachable-set itself is left intact; only this document
+// is scoped.
 func renderL3(
 	n *note.Note,
 	g *reach.Graph,
 	exported map[string]exportedFunc,
 	names map[*ast.FuncDecl]string,
+	repoPkgs map[string]struct{},
 ) string {
 	var b strings.Builder
 	b.WriteString(genMarker + "\n\n")
@@ -204,8 +222,10 @@ func renderL3(
 	}
 	b.WriteString("\n")
 
-	// Call-tree — the union of the reachable-sets of every anchor.
-	funcs := reachableFuncs(n, g)
+	// Call-tree — the union of the reachable-sets of every anchor, scoped
+	// to functions defined in this repository (stdlib and dependency
+	// functions RTA descended into are dropped from the document).
+	funcs := reachableFuncs(n, g, repoPkgs)
 	b.WriteString("## Call tree\n\n")
 	if len(funcs) == 0 {
 		b.WriteString("_No reachable functions._\n\n")
@@ -246,10 +266,22 @@ func anchorSymbols(n *note.Note) []string {
 }
 
 // reachableFuncs returns the deterministically sorted union of the
-// reachable-set function names of every anchor of n. An anchor whose
-// symbol is not a key of g.Sets (a stale anchor — C1's concern)
+// reachable-set function names of every anchor of n, scoped to functions
+// defined in one of the repository's own packages (repoPkgs). An anchor
+// whose symbol is not a key of g.Sets (a stale anchor — C1's concern)
 // contributes nothing.
-func reachableFuncs(n *note.Note, g *reach.Graph) []string {
+//
+// The scoping is the L3 counterpart of C3's repoRelPath file filter:
+// reach records whole-program reachable-sets (RTA transitively descends
+// into the standard library and module-cache dependencies), so an
+// unscoped call-tree would render the entire Go standard library as
+// documentation noise — the defect the first arch-gen roll-out on a real
+// repository exposed (a single L3 artifact at ~1.4 MB / 21000+ lines).
+// A reachable function whose canonical SSA name resolves to a package
+// outside repoPkgs (a stdlib or dependency function) is dropped here;
+// the underlying reachable-set is untouched, so C2's dead-code union
+// still sees the full transitive closure.
+func reachableFuncs(n *note.Note, g *reach.Graph, repoPkgs map[string]struct{}) []string {
 	set := map[string]struct{}{}
 	if g != nil {
 		for _, sym := range anchorSymbols(n) {
@@ -258,11 +290,58 @@ func reachableFuncs(n *note.Note, g *reach.Graph) []string {
 				continue
 			}
 			for _, f := range rs.Funcs {
+				if !isRepoFunc(f, repoPkgs) {
+					continue
+				}
 				set[f] = struct{}{}
 			}
 		}
 	}
 	return sortedKeys(set)
+}
+
+// collectRepoPkgPaths returns the set of import paths of the
+// repository's own loaded packages — the scope an L3 call-tree is
+// restricted to. pkgs are the packages explicitly loaded for the
+// repository ("./..."); their transitive imports — the standard library
+// and module-cache dependencies — are deliberately excluded, which is
+// exactly why a call-tree filtered through this set carries no stdlib
+// noise. The main package is kept: a handler's own composition-root
+// wiring is legitimate repository code.
+func collectRepoPkgPaths(pkgs []*packages.Package) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, pkg := range pkgs {
+		if pkg == nil || pkg.PkgPath == "" {
+			continue
+		}
+		out[pkg.PkgPath] = struct{}{}
+	}
+	return out
+}
+
+// isRepoFunc reports whether a canonical SSA function name denotes a
+// function defined in one of the repository's own packages (repoPkgs).
+//
+// A canonical SSA name is "pkg/path.Func" for a free function and
+// "(*pkg/path.Type).Method" or "(pkg/path.Type).Method" for a method
+// (reach derives it from *ssa.Function.String()). isRepoFunc strips any
+// leading method-receiver decoration, then reports true iff some repo
+// package path P is followed immediately by a "." — i.e. the symbol's
+// defining package is P. A symbol whose package is the standard library
+// or a module-cache dependency matches no repo path and is rejected,
+// which is what keeps the L3 call-tree scoped to this repository.
+func isRepoFunc(ssaName string, repoPkgs map[string]struct{}) bool {
+	body := ssaName
+	// Strip a method's "(*" / "(" receiver-open: the package path then
+	// begins at the start of body, before the receiver type and ").".
+	body = strings.TrimPrefix(body, "(*")
+	body = strings.TrimPrefix(body, "(")
+	for p := range repoPkgs {
+		if strings.HasPrefix(body, p+".") {
+			return true
+		}
+	}
+	return false
 }
 
 // reachableExportedSignatures returns the sorted Go signatures of the

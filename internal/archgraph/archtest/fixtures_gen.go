@@ -200,3 +200,130 @@ func GenHandlerSourceWithEnrich() string { return genHandlerSourceWithEnrich }
 // the gen test suite: the domain package extended with the new exported
 // EnrichSpec function.
 func GenDomainSourceWithEnrich() string { return genDomainSourceWithEnrich }
+
+// genStdlibHandlerSource is the NetworkService handler of the
+// stdlib-scoping arch-gen fixture (group D, scenario D7): Create reaches
+// the in-repo domain.ValidateSpec and repo.Insert AND genuinely calls
+// into the standard library — fmt.Sprintf with a %v verb, which RTA
+// over-approximates into the reflect / strconv / sync stdlib packages.
+// The anchor's reachable-set therefore contains GOROOT-resident source
+// files and stdlib SSA function names (archive/tar.*, fmt.*,
+// (*context.* …) on a real repo) — exactly the shape the real kacho-iam
+// repo exhibits, the one that ballooned a single L3 artifact to 1.4 MB.
+//
+// It exists so D7 can assert that arch-gen scopes an L3 artifact's
+// call-tree (and reachable exported signatures) to functions defined
+// UNDER repoRoot: a call-tree that dumped the whole transitive
+// reachable-set would render the entire Go standard library as
+// documentation noise.
+const genStdlibHandlerSource = `// Package handler implements the NetworkService gRPC handler of the
+// stdlib-scoping arch-gen fixture (D7). Create reaches the in-repo
+// domain.ValidateSpec and repo.Insert AND the standard library (fmt),
+// so its reachable-set spans GOROOT source files and stdlib functions.
+package handler
+
+import (
+	"fmt"
+
+	"example.com/genstdlib/internal/domain"
+	"example.com/genstdlib/internal/repo"
+)
+
+// Handler implements pb.NetworkServiceServer.
+type Handler struct {
+	repo *repo.NetworkRepo
+}
+
+// New returns a fresh Handler wired to a repo.
+func New() *Handler { return &Handler{repo: repo.New()} }
+
+// Create handles the Create RPC. It calls fmt.Sprintf — pulling stdlib
+// functions into its reachable-set — then reaches the in-repo
+// domain.ValidateSpec and repo.Insert.
+func (h *Handler) Create() {
+	_ = fmt.Sprintf("network %v created", h.repo)
+	domain.ValidateSpec(domain.Network{})
+	h.repo.Insert()
+}
+`
+
+// genStdlibDomainSource is genDomainSource re-homed under the genstdlib
+// module — the D7 fixture's domain package.
+const genStdlibDomainSource = `// Package domain holds the domain entities of the stdlib-scoping
+// arch-gen fixture (D7).
+package domain
+
+// State enumerates the lifecycle states of a Network.
+type State string
+
+const (
+	// StateProvisioning is the initial state of a Network.
+	StateProvisioning State = "PROVISIONING"
+	// StateActive marks a fully provisioned Network.
+	StateActive State = "ACTIVE"
+)
+
+// MaxSubnets is the upper bound on subnets per Network.
+const MaxSubnets = 64
+
+// Network is the domain entity for a VPC network.
+type Network struct {
+	// ID is the network identifier.
+	ID string
+	// Name is the human-readable network name.
+	Name string
+	// State is the lifecycle state.
+	State State
+}
+
+// ValidateSpec validates a Network spec. Reachable from the Create RPC,
+// so an L3 artifact built from the Create anchor lists its signature.
+func ValidateSpec(n Network) error { return nil }
+`
+
+// genStdlibRepoSource is genRepoSource re-homed under the genstdlib
+// module — the D7 fixture's persistence adapter.
+const genStdlibRepoSource = `// Package repo is the persistence adapter of the stdlib-scoping
+// arch-gen fixture (D7).
+package repo
+
+// NetworkRepo persists Network rows.
+type NetworkRepo struct{}
+
+// New returns a fresh NetworkRepo.
+func New() *NetworkRepo { return &NetworkRepo{} }
+
+// Insert writes a Network row. Reachable from Create.
+func (r *NetworkRepo) Insert() {
+	r.encodeRow()
+}
+
+// encodeRow is a private helper reachable transitively from Insert.
+func (r *NetworkRepo) encodeRow() {}
+`
+
+// SpecGenStdlibReach is the stdlib-scoping arch-gen fixture (group D,
+// scenario D7): a NetworkService whose Create handler reaches the
+// in-repo domain / repo packages AND genuinely calls into the standard
+// library (fmt.Sprintf with a %v verb). The anchor's reachable-set
+// therefore spans GOROOT-resident stdlib functions, so the D7 test can
+// assert arch-gen scopes the L3 call-tree to repo-defined functions only
+// — never dumping the standard library into the artifact.
+func SpecGenStdlibReach() Spec {
+	s := grpcServiceBase("example.com/genstdlib", []string{"Create"})
+	s.Notes = []NoteSpec{{
+		File: "network-lifecycle.md", Repo: "genstdlib",
+		RPCAnchors: []string{"kacho.cloud.vpc.v1.NetworkService/Create"},
+		SourceSHA:  FreshSHA,
+		Body: "# Network lifecycle\n\n" +
+			"This curated L2 note anchors NetworkService/Create, whose handler\n" +
+			"calls into the standard library — its reachable-set spans GOROOT\n" +
+			"files. arch-gen's L3 call-tree must still list in-repo functions only.\n",
+	}}
+	s.Files = map[string]string{
+		"internal/handler/handler.go": genStdlibHandlerSource,
+		"internal/domain/domain.go":   genStdlibDomainSource,
+		"internal/repo/repo.go":       genStdlibRepoSource,
+	}
+	return s
+}

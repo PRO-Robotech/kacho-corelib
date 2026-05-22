@@ -280,6 +280,88 @@ func Test_4_0_D6_RemovesStaleArtifact(t *testing.T) {
 	require.NotContains(t, names, "l3-removed-functionality.md")
 }
 
+// Test_archgen_L3CallTreeScopedToRepo is the regression guard for the
+// defect the first arch-gen roll-out on a real repository (kacho-iam)
+// exposed: an L3 artifact's `## Call tree` section dumped the WHOLE
+// transitive reachable-set — including the entire Go standard library
+// (archive/tar, fmt, context, …) RTA descends into — ballooning a single
+// L3 artifact to ~1.4 MB / 21000+ lines of documentation noise.
+//
+// The fix scopes the L3 call-tree (and the reachable exported
+// signatures) to functions defined UNDER repoRoot — the same scoping C3
+// already applies to its freshness hash. Reachability through stdlib is
+// still computed (C2's dead-code union needs the full set); only the L3
+// *document* is scoped.
+//
+// The fixture's Create handler genuinely calls fmt.Sprintf with a %v
+// verb, so RTA over-approximates interface dispatch into the reflect /
+// strconv / sync stdlib packages and the anchor's raw reachable-set
+// provably contains stdlib functions — the shape the empty-handler D1..D6
+// fixtures never reproduce.
+func Test_archgen_L3CallTreeScopedToRepo(t *testing.T) {
+	root := runGen(t, archtest.SpecGenStdlibReach())
+
+	l3 := readGenerated(t, root, "l3-network-lifecycle.md")
+
+	// The in-repo functions the call-tree must still list: the entry-point
+	// root, the transitively reachable repo functions and the private
+	// helper.
+	require.Contains(t, l3, "Create",
+		"the L3 call-tree must keep the entry-point root")
+	require.Contains(t, l3, "ValidateSpec",
+		"the L3 call-tree must keep the in-repo reachable ValidateSpec")
+	require.Contains(t, l3, "Insert",
+		"the L3 call-tree must keep the in-repo reachable Insert")
+	require.Contains(t, l3, "encodeRow",
+		"the L3 call-tree must keep the in-repo private helper encodeRow")
+	require.Contains(t, l3, "func ValidateSpec(n Network) error",
+		"the L3 artifact must still list in-repo exported signatures")
+
+	// No stdlib / dependency function may leak into the L3 document.
+	// archive/tar, fmt, context et al. are the stdlib packages RTA
+	// descends into; their canonical SSA names embed these exact package
+	// paths. (The strict per-line scan below additionally catches any
+	// leak whose package prefix is not in this list.)
+	for _, marker := range []string{
+		"archive/tar.", "(*archive/tar.", "(*fmt.", "(*fmt.pp)",
+		"(*context.", "(*reflect.", "internal/abi.", "(*sync.",
+		"(*errors.errorString)",
+	} {
+		require.NotContains(t, l3, marker,
+			"L3 call-tree must be scoped to repo functions — stdlib/dep "+
+				"marker %q leaked into the artifact", marker)
+	}
+
+	// Strict form: every bullet line of the artifact names a symbol of the
+	// fixture module (example.com/genstdlib). A call-tree bullet is
+	// `- `pkg/path.Func`` or `- `(*pkg/path.Type).Method``.
+	for _, ln := range strings.Split(l3, "\n") {
+		ln = strings.TrimSpace(ln)
+		if !strings.HasPrefix(ln, "- `") {
+			continue
+		}
+		sym := strings.TrimSuffix(strings.TrimPrefix(ln, "- `"), "`")
+		// Anchor bullets carry the gRPC FQN, not a Go symbol — skip them.
+		if strings.HasPrefix(sym, "kacho.cloud.") {
+			continue
+		}
+		// Exported-signature bullets are `func ...` — they carry no package
+		// path, so a stdlib leak there is caught by the marker scan above.
+		if strings.HasPrefix(sym, "func ") {
+			continue
+		}
+		require.Contains(t, sym, "example.com/genstdlib",
+			"L3 call-tree bullet %q must reference the fixture module — "+
+				"a non-repo symbol leaked into the artifact", sym)
+	}
+
+	// Sanity floor: the scoped artifact is small. The unscoped defect
+	// produced ~1.4 MB; a repo-scoped one is a few hundred bytes.
+	require.Less(t, len(l3), 8*1024,
+		"a repo-scoped L3 artifact must be small (got %d bytes); the "+
+			"unscoped defect produced ~1.4 MB", len(l3))
+}
+
 // snapshotGenerated records the content of every .md file under
 // docs/arch/generated/, keyed by base name.
 func snapshotGenerated(t *testing.T, root string) map[string]string {
