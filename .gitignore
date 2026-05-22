@@ -1,6 +1,7 @@
 *.exe
 *.test
 coverage.out
+/archgraph
 .idea/
 .vscode/
 .DS_Store
