@@ -8,11 +8,11 @@
 //
 // This package owns argument parsing, repository-root discovery, Go
 // package loading (fail-fast on compile errors), check orchestration
-// and exit-code policy. arch-audit runs the C1 completeness check over
-// the discovered entry-point inventory and the repository's L2 notes; a
-// C1 failure exits non-zero. arch-gen is still a no-op stub (a later
-// task). C2/C3 and the combined-verdict orchestration also arrive in
-// later tasks.
+// and exit-code policy. arch-audit runs the C1/C2/C3 architecture
+// checks over the discovered entry-point inventory and the repository's
+// L2 notes; any failure exits non-zero. arch-gen generates the L3 and L4
+// architecture artifacts under docs/arch/generated/ and exits 0 on
+// success.
 //
 // Exit codes (stable contract):
 //
@@ -33,6 +33,7 @@ import (
 
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/check"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/entrypoints"
+	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/gen"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/note"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/reach"
 )
@@ -126,15 +127,48 @@ func Run(args []string, stdout, stderr io.Writer) int {
 
 	switch sub {
 	case subGen:
-		// Generation is a later task; report a no-op success.
-		writeString(stdout, fmt.Sprintf(
-			"arch-gen: loaded repository %s (%d entry-points discovered, "+
-				"no documentation generated yet)\n",
-			repoRoot, len(inv.Entries)))
-		return ExitOK
+		return runGen(repoRoot, pkgs, inv, stdout, stderr)
 	case subAudit:
 		return runAudit(repoRoot, pkgs, inv, stdout, stderr)
 	}
+	return ExitOK
+}
+
+// runGen runs the arch-gen pass: it generates the L3 (per-functionality
+// call-tree + reachable exported signatures) and L4 (per-repository
+// domain-type / field / constant tables) artifacts under
+// docs/arch/generated/, then reports what it wrote. The curated L1/L2
+// notes under docs/arch/ are never touched. arch-gen exits 0 on success
+// and ExitStartupError on a reachability or filesystem failure — it
+// raises no architecture verdict of its own.
+func runGen(
+	repoRoot string,
+	pkgs []*packages.Package,
+	inv *entrypoints.Inventory,
+	stdout, stderr io.Writer,
+) int {
+	notes, err := loadArchNotes(repoRoot)
+	if err != nil {
+		writeString(stderr, err.Error()+"\n")
+		return ExitStartupError
+	}
+
+	// The reachability graph is the source of every L3 artifact's
+	// call-tree and reachable-signature set.
+	g, err := reach.Compute(pkgs, inv)
+	if err != nil {
+		writeString(stderr, err.Error()+"\n")
+		return ExitStartupError
+	}
+
+	if err := gen.Generate(repoRoot, pkgs, inv, g, notes); err != nil {
+		writeString(stderr, err.Error()+"\n")
+		return ExitStartupError
+	}
+
+	writeString(stdout, fmt.Sprintf(
+		"arch-gen: generated L3/L4 artifacts under %s/docs/arch/generated\n",
+		repoRoot))
 	return ExitOK
 }
 
@@ -315,11 +349,17 @@ func loadPackages(repoRoot string) ([]*packages.Package, error) {
 			packages.NeedTypesInfo,
 		Dir:   repoRoot,
 		Tests: false,
-		// Pin the toolchain to the locally installed one: archgraph
-		// must analyze code offline and deterministically, never
-		// pause to download a Go toolchain referenced by the target
-		// repository's go.mod.
-		Env: append(os.Environ(), "GOTOOLCHAIN=local"),
+		// Pin the toolchain to the locally installed one and disable
+		// go.work: archgraph must analyze code offline and
+		// deterministically. GOTOOLCHAIN=local stops the loader pausing
+		// to download a Go toolchain referenced by the target
+		// repository's go.mod. GOWORK=off stops an ambient go.work of a
+		// surrounding multi-module checkout (the kacho repos use
+		// `replace ../` in go.mod and a workspace go.work) pinning a
+		// stale go directive or pulling sibling modules into the load —
+		// archgraph's analysis must depend only on the repository under
+		// --repo-root, not on the directory it happens to be run from.
+		Env: append(os.Environ(), "GOTOOLCHAIN=local", "GOWORK=off"),
 	}
 	pkgs, err := packages.Load(cfg, "./...")
 	if err != nil {

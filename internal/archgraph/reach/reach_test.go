@@ -11,7 +11,9 @@ package reach_test
 // with golang.org/x/tools/go/packages, then run through entry-point
 // discovery and reach.Compute. No testcontainers, no network: every
 // fixture is self-contained and pins go 1.21 so it loads under
-// GOTOOLCHAIN=local.
+// GOTOOLCHAIN=local. Every fixture load also sets GOWORK=off so an
+// ambient go.work of a surrounding multi-module checkout cannot pin a
+// stale go directive or pull sibling modules into the analysed program.
 
 import (
 	"os"
@@ -43,7 +45,7 @@ func loadFixture(t *testing.T, spec archtest.Spec) []*packages.Package {
 			packages.NeedTypesInfo,
 		Dir:   root,
 		Tests: false,
-		Env:   append(os.Environ(), "GOTOOLCHAIN=local"),
+		Env:   append(os.Environ(), "GOTOOLCHAIN=local", "GOWORK=off"),
 	}
 	pkgs, err := packages.Load(cfg, "./...")
 	require.NoError(t, err, "loading fixture %s", spec.Module)
@@ -83,7 +85,7 @@ func loadPackagesAt(t *testing.T, root string) []*packages.Package {
 			packages.NeedTypesInfo,
 		Dir:   root,
 		Tests: false,
-		Env:   append(os.Environ(), "GOTOOLCHAIN=local"),
+		Env:   append(os.Environ(), "GOTOOLCHAIN=local", "GOWORK=off"),
 	}
 	pkgs, err := packages.Load(cfg, "./...")
 	require.NoError(t, err, "loading module at %s", root)

@@ -25,7 +25,7 @@ func loadBuilt(t *testing.T, spec archtest.Spec) []*packages.Package {
 			packages.NeedDeps | packages.NeedTypes | packages.NeedSyntax |
 			packages.NeedTypesInfo,
 		Dir: root,
-		Env: append(os.Environ(), "GOTOOLCHAIN=local"),
+		Env: append(os.Environ(), "GOTOOLCHAIN=local", "GOWORK=off"),
 	}
 	pkgs, err := packages.Load(cfg, "./...")
 	require.NoError(t, err)

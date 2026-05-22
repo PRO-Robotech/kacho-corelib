@@ -49,7 +49,7 @@ func loadInventoryAt(t *testing.T, root string) *entrypoints.Inventory {
 			packages.NeedTypesInfo,
 		Dir:   root,
 		Tests: false,
-		Env:   append(os.Environ(), "GOTOOLCHAIN=local"),
+		Env:   append(os.Environ(), "GOTOOLCHAIN=local", "GOWORK=off"),
 	}
 	pkgs, err := packages.Load(cfg, "./...")
 	require.NoError(t, err, "loading fixture at %s", root)

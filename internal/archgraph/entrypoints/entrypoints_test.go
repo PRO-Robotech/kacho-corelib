@@ -42,7 +42,7 @@ func loadFixture(t *testing.T, spec archtest.Spec) []*packages.Package {
 			packages.NeedTypesInfo,
 		Dir:   root,
 		Tests: false,
-		Env:   append(os.Environ(), "GOTOOLCHAIN=local"),
+		Env:   append(os.Environ(), "GOTOOLCHAIN=local", "GOWORK=off"),
 	}
 	pkgs, err := packages.Load(cfg, "./...")
 	require.NoError(t, err, "loading fixture %s", spec.Module)
