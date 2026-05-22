@@ -318,3 +318,136 @@ func Test_4_0_E6_C1EmptyAnchorsIgnored(t *testing.T) {
 	require.Contains(t, res.stdout,
 		"C1 completeness: PASS (2/2 entry-points anchored)")
 }
+
+// Test_4_0_F1_C2PassExitZero: arch-audit on a repo whose every exported
+// symbol is reachable prints the C2 PASS summary and exits 0.
+func Test_4_0_F1_C2PassExitZero(t *testing.T) {
+	res := run(t, fixture(t, "f1"), "arch-audit")
+	require.Equal(t, 0, res.exitCode,
+		"a repo with no dead code must pass C2; stderr=%s", res.stderr)
+	require.Contains(t, res.stdout,
+		"C2 dead-code: PASS (0 unreachable exported symbols)")
+}
+
+// Test_4_0_F2_C2FailUnreachableExitNonZero: an unreachable exported
+// symbol makes arch-audit print the C2 FAIL summary plus the dead-code
+// finding (symbol + file:line) and exit non-zero.
+func Test_4_0_F2_C2FailUnreachableExitNonZero(t *testing.T) {
+	res := run(t, fixture(t, "f2"), "arch-audit")
+	require.NotEqual(t, 0, res.exitCode, "an unreachable exported symbol must fail")
+	out := res.stdout + res.stderr
+	require.Contains(t, out, "C2 dead-code: FAIL")
+	require.Contains(t, out,
+		"dead code: exported symbol LegacyMigrateAddresses "+
+			"(internal/repo/legacy.go:14) unreachable from any entry-point")
+}
+
+// Test_4_0_F3_C2KeepSuppresses: a `// archgraph:keep <reason>`
+// annotation over an unreachable exported symbol keeps C2 passing and
+// makes arch-audit print the kept-symbol line; C2 does not contribute a
+// non-zero exit.
+func Test_4_0_F3_C2KeepSuppresses(t *testing.T) {
+	res := run(t, fixture(t, "f3"), "arch-audit")
+	require.Equal(t, 0, res.exitCode,
+		"a kept symbol must not fail the audit; stderr=%s", res.stderr)
+	require.Contains(t, res.stdout, "C2 dead-code: PASS")
+	require.Contains(t, res.stdout,
+		"kept: BuildClientSDK (reason: public SDK surface, "+
+			"consumed by external clients)")
+}
+
+// Test_4_0_F4_C2KeepWithoutReasonRejected: a bare `// archgraph:keep`
+// with no reason makes arch-audit print the C2 FAIL summary plus the
+// invalid-annotation finding and exit non-zero.
+func Test_4_0_F4_C2KeepWithoutReasonRejected(t *testing.T) {
+	res := run(t, fixture(t, "f4"), "arch-audit")
+	require.NotEqual(t, 0, res.exitCode, "a bare archgraph:keep must fail")
+	out := res.stdout + res.stderr
+	require.Contains(t, out, "C2 dead-code: FAIL")
+	require.Contains(t, out,
+		"invalid annotation: // archgraph:keep at internal/repo/x.go:9 "+
+			"requires a non-empty reason")
+}
+
+// Test_4_0_F5_C2KeepIsTransitive: a kept function is an extra
+// reachability root — arch-audit passes C2 because nothing transitively
+// reachable from the kept BuildClientSDK is reported as dead.
+func Test_4_0_F5_C2KeepIsTransitive(t *testing.T) {
+	res := run(t, fixture(t, "f5"), "arch-audit")
+	require.Equal(t, 0, res.exitCode,
+		"keep transitivity must keep C2 passing; stderr=%s", res.stderr)
+	require.Contains(t, res.stdout, "C2 dead-code: PASS")
+	require.NotContains(t, res.stdout, "EncodeManifest")
+}
+
+// Test_4_0_F6_C2ReflectionKeepContinuation: a reflection-only exported
+// method is reported dead by C2 (an expected RTA imprecision). The test
+// runs as a continuation: first arch-audit on a verbatim copy of the f6
+// fixture FAILS; after injecting `// archgraph:keep reflection-invoked`
+// above the method, a second arch-audit PASSES.
+func Test_4_0_F6_C2ReflectionKeepContinuation(t *testing.T) {
+	// Work on a copy: testdata stays immutable.
+	work := t.TempDir()
+	copyTree(t, fixture(t, "f6"), work)
+
+	// Phase 1 — before annotation: C2 fails on the reflection-only method.
+	before := run(t, work, "arch-audit")
+	require.NotEqual(t, 0, before.exitCode,
+		"a reflection-only method must fail C2 before annotation")
+	out := before.stdout + before.stderr
+	require.Contains(t, out, "C2 dead-code: FAIL")
+	require.Contains(t, out, "ReflectInvoke")
+
+	// Inject the keep annotation directly above the method declaration.
+	regFile := filepath.Join(work, "internal", "registry", "registry.go")
+	src, err := os.ReadFile(regFile)
+	require.NoError(t, err)
+	annotated := strings.Replace(string(src),
+		"// ReflectInvoke is exported and invoked only via reflect.Value.Call.\n",
+		"// ReflectInvoke is exported and invoked only via reflect.Value.Call.\n"+
+			"// archgraph:keep reflection-invoked\n",
+		1)
+	require.NotEqual(t, string(src), annotated, "annotation must be injected")
+	require.NoError(t, os.WriteFile(regFile, []byte(annotated), 0o644))
+
+	// Phase 2 — after annotation: C2 passes.
+	after := run(t, work, "arch-audit")
+	require.Equal(t, 0, after.exitCode,
+		"after the keep annotation C2 must pass; stderr=%s", after.stderr)
+	require.Contains(t, after.stdout, "C2 dead-code: PASS")
+}
+
+// Test_4_0_F7_C2LibrarySkip: a pure library repo (no main package) makes
+// arch-audit print the C2 SKIP summary; C2 does not contribute to the
+// exit code while C1 still runs.
+func Test_4_0_F7_C2LibrarySkip(t *testing.T) {
+	res := run(t, fixture(t, "f7"), "arch-audit")
+	require.Equal(t, 0, res.exitCode,
+		"a library repo must not fail the audit; stderr=%s", res.stderr)
+	require.Contains(t, res.stdout,
+		"C2 dead-code: SKIP (library repo: no main package)")
+}
+
+// copyTree recursively copies the directory tree rooted at src into dst.
+func copyTree(t *testing.T, src, dst string) {
+	t.Helper()
+	err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, rerr := filepath.Rel(src, path)
+		if rerr != nil {
+			return rerr
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		return os.WriteFile(target, data, info.Mode().Perm())
+	})
+	require.NoError(t, err, "copying fixture tree")
+}

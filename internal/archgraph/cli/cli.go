@@ -132,7 +132,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			repoRoot, len(inv.Entries)))
 		return ExitOK
 	case subAudit:
-		return runAudit(repoRoot, inv, stdout, stderr)
+		return runAudit(repoRoot, pkgs, inv, stdout, stderr)
 	}
 	return ExitOK
 }
@@ -142,20 +142,44 @@ func Run(args []string, stdout, stderr io.Writer) int {
 const archNotesDir = "docs/arch"
 
 // runAudit runs the blocking architecture checks over the discovered
-// inventory and returns the process exit code. At this stage only C1
-// (completeness) is wired; C2/C3 and the combined-verdict orchestration
-// arrive in later tasks. A C1 failure makes arch-audit exit non-zero.
-func runAudit(repoRoot string, inv *entrypoints.Inventory, stdout, stderr io.Writer) int {
+// inventory and returns the process exit code. C1 (completeness) and C2
+// (dead-code) are wired; C3 and the full combined-verdict orchestration
+// arrive in later tasks. arch-audit exits non-zero if any check fails.
+func runAudit(
+	repoRoot string,
+	pkgs []*packages.Package,
+	inv *entrypoints.Inventory,
+	stdout, stderr io.Writer,
+) int {
 	notes, err := loadArchNotes(repoRoot)
 	if err != nil {
 		writeString(stderr, err.Error()+"\n")
 		return ExitStartupError
 	}
 
-	res := check.CheckC1(inv, notes)
+	c1 := check.CheckC1(inv, notes)
+	printResult(stdout, c1)
 
-	// Summary first, then each finding, then any advisory hints — a
-	// deterministic, CI-assertable layout.
+	c2, err := check.CheckC2(repoRoot, pkgs, inv)
+	if err != nil {
+		writeString(stderr, err.Error()+"\n")
+		return ExitStartupError
+	}
+	printResult(stdout, c2)
+
+	// arch-audit fails if any wired check fails. A SKIP verdict (a
+	// library repo's C2) carries Passed=true, so it never contributes a
+	// non-zero exit.
+	if !c1.Passed || !c2.Passed {
+		return ExitCheckFailed
+	}
+	return ExitOK
+}
+
+// printResult writes one check's verdict in archgraph's deterministic,
+// CI-assertable layout: the summary line, then each finding, then any
+// advisory hint, every detail line indented two spaces.
+func printResult(stdout io.Writer, res check.Result) {
 	writeString(stdout, res.Summary+"\n")
 	for _, f := range res.Findings {
 		writeString(stdout, "  "+f.String()+"\n")
@@ -163,11 +187,6 @@ func runAudit(repoRoot string, inv *entrypoints.Inventory, stdout, stderr io.Wri
 	for _, h := range res.Hints {
 		writeString(stdout, "  "+h+"\n")
 	}
-
-	if !res.Passed {
-		return ExitCheckFailed
-	}
-	return ExitOK
 }
 
 // loadArchNotes loads the L2 functionality notes under repoRoot's

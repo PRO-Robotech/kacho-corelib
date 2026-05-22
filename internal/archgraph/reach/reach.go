@@ -54,6 +54,7 @@ package reach
 
 import (
 	"fmt"
+	"go/types"
 	"sort"
 
 	"golang.org/x/tools/go/callgraph"
@@ -64,6 +65,24 @@ import (
 
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/entrypoints"
 )
+
+// KeptRootKey is the canonical Graph.Sets key under which the
+// reachable-set of a single `// archgraph:keep`-annotated root is
+// stored. It is a synthetic key — distinct from any entry-point name —
+// so a caller can tell entry-point reachable-sets from keep-root ones,
+// and so Graph.Union (which folds every set) automatically counts the
+// keep roots' transitive closure as reachable. The key embeds the kept
+// root's canonical SSA name to stay unique and deterministic.
+func KeptRootKey(ssaName string) string { return "archgraph:keep " + ssaName }
+
+// MainRootKey is the canonical Graph.Sets key under which the
+// reachable-set of a single main function is stored. A service's main
+// is a reachability root in its own right: the composition-root wiring
+// it runs — gRPC server bootstrap, adapter construction, the
+// RegisterXxxServer calls — is live code, not dead code, even though no
+// gRPC *handler* method calls it. Folding main into Graph.Union is what
+// keeps C2 from flagging a repository's bootstrap as dead.
+func MainRootKey(pkgPath string) string { return "main:" + pkgPath }
 
 // ReachableSet is the deterministically ordered set of functions and
 // source files reachable from one root (an entry-point, or the union of
@@ -84,18 +103,28 @@ type ReachableSet struct {
 // Graph is the reachability result for a repository: one ReachableSet
 // per entry-point, keyed by the entry-point's canonical name.
 type Graph struct {
-	// Sets maps an entry-point canonical name (entrypoints.EntryPoint.Name)
-	// to the ReachableSet computed from that entry-point's root. It is
-	// empty for a library repository (no entry-points).
+	// Sets maps a reachability root to the ReachableSet computed from it.
+	// A root is one of three kinds, distinguished by its key:
+	//
+	//   - an entry-point — keyed by its canonical name
+	//     (entrypoints.EntryPoint.Name);
+	//   - the process main — keyed by MainRootKey(pkgpath); a service's
+	//     composition root and the code it wires up (server bootstrap,
+	//     adapter construction) is live by virtue of being run;
+	//   - an `// archgraph:keep`-annotated root — keyed by
+	//     KeptRootKey(ssaName).
+	//
+	// Sets is empty for a library repository (no main, no entry-points).
 	Sets map[string]ReachableSet
 }
 
-// Union returns the reachable-set that is the union of every
-// entry-point's reachable-set: a function/file is in the union iff it
-// is reachable from at least one entry-point. The result is
-// deterministically sorted. For a library repository the union is
-// empty. Union is the input to dead-code detection (Task 6, C2): an
-// exported symbol absent from the union is a dead-code candidate.
+// Union returns the reachable-set that is the union of every root's
+// reachable-set — entry-points, the process main and any kept roots: a
+// function/file is in the union iff it is reachable from at least one
+// of them. The result is deterministically sorted. For a library
+// repository the union is empty. Union is the input to dead-code
+// detection (Task 6, C2): an exported symbol absent from the union is a
+// dead-code candidate.
 func (g *Graph) Union() ReachableSet {
 	funcs := map[string]struct{}{}
 	files := map[string]struct{}{}
@@ -121,11 +150,70 @@ func (g *Graph) Union() ReachableSet {
 // entry-point root that cannot be lowered to an *ssa.Function (which
 // would indicate a bug upstream in entry-point discovery, not a
 // property of the analyzed code).
+//
+// Compute is the no-extra-roots case of ComputeWithRoots.
 func Compute(pkgs []*packages.Package, inv *entrypoints.Inventory) (*Graph, error) {
+	return ComputeWithRoots(pkgs, inv, nil)
+}
+
+// ComputeWithRoots is Compute extended with an additional set of
+// reachability roots — the `// archgraph:keep`-annotated symbols the C2
+// dead-code check (Task 6) treats as live entry-points in their own
+// right.
+//
+// Each kept root is seeded into RTA alongside the entry-point roots and
+// the repository's main functions, and its own BFS reachable-set is
+// added to the returned Graph under the synthetic KeptRootKey(name)
+// key. Because Graph.Union folds every set, a symbol transitively
+// reachable from a kept root is automatically part of the union — that
+// is how C2 keep-transitivity (scenario 4.0-F5) is realised: marking a
+// function kept revives its whole reachable subtree.
+//
+// extra holds the *types.Func of each kept root. A nil or empty extra
+// makes ComputeWithRoots behave exactly like Compute. A kept func that
+// cannot be lowered to an *ssa.Function (a rare SSA-mapping edge case)
+// is skipped silently: a keep annotation must never make the analysis
+// itself fail.
+func ComputeWithRoots(
+	pkgs []*packages.Package,
+	inv *entrypoints.Inventory,
+	extra []*types.Func,
+) (*Graph, error) {
+	g, _, err := ComputeWithSymbols(pkgs, inv, extra, nil)
+	return g, err
+}
+
+// ComputeWithSymbols is the full reachability entry point: it computes
+// the graph exactly as ComputeWithRoots does, and additionally resolves
+// a caller-supplied set of symbols to their canonical SSA names off the
+// same single SSA build.
+//
+// symbols holds the *types.Func the caller wants canonical names for —
+// the repository's exported functions and methods, for the C2 dead-code
+// check. The returned map keys are exactly the resolvable entries of
+// symbols; a *types.Func that does not lower to an *ssa.Function (an
+// interface method, or a declaration the SSA builder elided) is absent
+// from the map, so the caller can tell it apart from a resolved-but-dead
+// symbol. The canonical name is *ssa.Function.String() — identical to
+// the names populating ReachableSet.Funcs, so membership can be tested
+// directly.
+//
+// Sharing one SSA build between the call-graph and the name resolver
+// keeps the C2 check from lowering the program twice.
+func ComputeWithSymbols(
+	pkgs []*packages.Package,
+	inv *entrypoints.Inventory,
+	extra []*types.Func,
+	symbols []*types.Func,
+) (*Graph, map[*types.Func]string, error) {
 	g := &Graph{Sets: map[string]ReachableSet{}}
-	if inv == nil || len(inv.Entries) == 0 {
-		// Library repo (or nothing to analyze): empty graph, not an error.
-		return g, nil
+	names := map[*types.Func]string{}
+	if (inv == nil || len(inv.Entries) == 0) && len(extra) == 0 {
+		// No reachability roots: empty graph. Symbols are still resolved
+		// below only if a program is built — with no roots there is
+		// nothing to analyze, so the names map stays empty too. This is
+		// the library-repo path; C2 skips before reaching here.
+		return g, names, nil
 	}
 
 	// Lower every initial package plus dependencies to SSA, then build
@@ -135,20 +223,39 @@ func Compute(pkgs []*packages.Package, inv *entrypoints.Inventory) (*Graph, erro
 	prog.Build()
 
 	// Map each entry-point's *types.Func root to its *ssa.Function.
-	roots := make([]*ssa.Function, 0, len(inv.Entries))
-	epRoots := make(map[string]*ssa.Function, len(inv.Entries))
-	for _, ep := range inv.Entries {
-		if ep.Root == nil {
-			return nil, fmt.Errorf("reach: entry-point %q has a nil root func", ep.Name)
+	var roots []*ssa.Function
+	epRoots := map[string]*ssa.Function{}
+	if inv != nil {
+		epRoots = make(map[string]*ssa.Function, len(inv.Entries))
+		for _, ep := range inv.Entries {
+			if ep.Root == nil {
+				return nil, nil, fmt.Errorf("reach: entry-point %q has a nil root func", ep.Name)
+			}
+			fn := prog.FuncValue(ep.Root)
+			if fn == nil {
+				return nil, nil, fmt.Errorf(
+					"reach: cannot map entry-point %q root %s to an SSA function "+
+						"(interface method or package not built)",
+					ep.Name, ep.Root.FullName())
+			}
+			epRoots[ep.Name] = fn
+			roots = append(roots, fn)
 		}
-		fn := prog.FuncValue(ep.Root)
+	}
+
+	// Map each kept root's *types.Func to its *ssa.Function. A keep
+	// annotation must never break the analysis, so an unmappable kept
+	// func is skipped rather than erroring.
+	keptRoots := map[string]*ssa.Function{}
+	for _, kf := range extra {
+		if kf == nil {
+			continue
+		}
+		fn := prog.FuncValue(kf)
 		if fn == nil {
-			return nil, fmt.Errorf(
-				"reach: cannot map entry-point %q root %s to an SSA function "+
-					"(interface method or package not built)",
-				ep.Name, ep.Root.FullName())
+			continue
 		}
-		epRoots[ep.Name] = fn
+		keptRoots[KeptRootKey(fn.String())] = fn
 		roots = append(roots, fn)
 	}
 
@@ -157,15 +264,37 @@ func Compute(pkgs []*packages.Package, inv *entrypoints.Inventory) (*Graph, erro
 	// that make interface dispatch resolvable. mainFuncs is appended in
 	// a deterministic order; RTA's result does not depend on root order,
 	// but a stable order keeps debugging reproducible.
-	roots = append(roots, mainFuncs(prog)...)
+	mains := mainFuncs(prog)
+	roots = append(roots, mains...)
 
 	res := rta.Analyze(roots, true)
 
-	// For each entry-point, BFS the RTA call-graph from its root node.
+	// For each entry-point, each main function and each kept root, BFS
+	// the RTA call-graph from its root node. main is a root of its own:
+	// the bootstrap code it runs is live, not dead (so C2's union counts
+	// it). epRoots and keptRoots cannot collide with the synthetic main
+	// keys, so a plain map assignment is unambiguous.
 	for name, fn := range epRoots {
 		g.Sets[name] = reachableFrom(res.CallGraph, fn)
 	}
-	return g, nil
+	for _, fn := range mains {
+		g.Sets[MainRootKey(fn.Pkg.Pkg.Path())] = reachableFrom(res.CallGraph, fn)
+	}
+	for key, fn := range keptRoots {
+		g.Sets[key] = reachableFrom(res.CallGraph, fn)
+	}
+
+	// Resolve the caller's symbols to canonical SSA names off the same
+	// build. An unmappable symbol is left out of the map.
+	for _, sym := range symbols {
+		if sym == nil {
+			continue
+		}
+		if fn := prog.FuncValue(sym); fn != nil {
+			names[sym] = fn.String()
+		}
+	}
+	return g, names, nil
 }
 
 // reachableFrom walks cg breadth-first from the node of root and returns
