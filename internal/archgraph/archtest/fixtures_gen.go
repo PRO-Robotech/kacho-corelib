@@ -1,5 +1,7 @@
 package archtest
 
+import "strings"
+
 // arch-gen fixtures (group D): a gRPC service with a reachable call chain
 // of exported functions, an L2 note anchoring the entry-point, and a
 // domain package carrying exported types, fields and constants — the
@@ -326,4 +328,137 @@ func SpecGenStdlibReach() Spec {
 		"internal/repo/repo.go":       genStdlibRepoSource,
 	}
 	return s
+}
+
+// genRPCContractProto is the synthetic kacho-proto NetworkService file for
+// the RPC-contract arch-gen fixture: a REST-annotated Create whose verb /
+// path / request / response shape the L3 "RPC contract" table must render.
+const genRPCContractProto = `syntax = "proto3";
+
+package kacho.cloud.vpc.v1;
+
+import "google/api/annotations.proto";
+
+// NetworkService is the public VPC network API.
+service NetworkService {
+  // Create provisions a network. Async — returns an Operation.
+  rpc Create (CreateNetworkRequest) returns (operation.Operation) {
+    option (google.api.http) = { post: "/vpc/v1/networks" body: "*" };
+  }
+  // Get reads a network. Sync.
+  rpc Get (GetNetworkRequest) returns (Network) {
+    option (google.api.http) = { get: "/vpc/v1/networks/{network_id}" };
+  }
+}
+`
+
+// SpecGenRPCContract is the RPC-contract arch-gen fixture: the standard
+// NetworkService/Create functionality plus a synthetic kacho-proto module
+// carrying the service's .proto. arch-gen's L3 artifact must add a
+// `## RPC contract` section rowing the anchored Create RPC with its gRPC
+// request/response shape and its REST verb + path.
+func SpecGenRPCContract() Spec {
+	s := grpcServiceBase("example.com/genrpccontract", []string{"Create"})
+	s.Files = map[string]string{
+		"internal/handler/handler.go": rehome(genHandlerSource, "genbasic", "genrpccontract"),
+		"internal/domain/domain.go":   genDomainSource,
+		"internal/repo/repo.go":       genRepoSource,
+	}
+	s.Notes = []NoteSpec{{
+		File: "network-lifecycle.md", Repo: "genrpccontract",
+		RPCAnchors: []string{"kacho.cloud.vpc.v1.NetworkService/Create"},
+		SourceSHA:  FreshSHA,
+		Body: "# Network lifecycle\n\n" +
+			"This curated L2 note anchors NetworkService/Create. arch-gen must\n" +
+			"add an RPC contract section recovered from the repo's kacho-proto.\n",
+	}}
+	s.ProtoFiles = map[string]string{
+		"kacho/cloud/vpc/v1/network_service.proto": genRPCContractProto,
+	}
+	return s
+}
+
+// genRPCContractInternalProto is the synthetic kacho-proto file for the
+// Internal-service RPC-contract fixture: an InternalNetworkService whose
+// UpdateStatus carries no (google.api.http) annotation, so the L3 RPC
+// contract table renders an em-dash REST cell for it.
+const genRPCContractInternalProto = `syntax = "proto3";
+
+package kacho.cloud.vpc.v1;
+
+// InternalNetworkService is the cluster-internal VPC network API.
+service InternalNetworkService {
+  // UpdateStatus writes a network's status. No REST annotation — internal.
+  rpc UpdateStatus (UpdateStatusRequest) returns (UpdateStatusResponse);
+}
+`
+
+// genInternalHandlerSource is the InternalNetworkService handler of the
+// RPC-contract-internal fixture: an UpdateStatus RPC root reaching the
+// in-repo domain.ValidateSpec and repo.Insert.
+const genInternalHandlerSource = `// Package handler implements the InternalNetworkService gRPC handler of
+// the RPC-contract-internal arch-gen fixture.
+package handler
+
+import (
+	"example.com/geninternal/internal/domain"
+	"example.com/geninternal/internal/repo"
+)
+
+// Handler implements pb.InternalNetworkServiceServer.
+type Handler struct {
+	repo *repo.NetworkRepo
+}
+
+// New returns a fresh Handler wired to a repo.
+func New() *Handler { return &Handler{repo: repo.New()} }
+
+// UpdateStatus handles the UpdateStatus RPC. It is the rpc entry-point root.
+func (h *Handler) UpdateStatus() {
+	domain.ValidateSpec(domain.Network{})
+	h.repo.Insert()
+}
+`
+
+// SpecGenRPCContractInternal is the Internal-service RPC-contract arch-gen
+// fixture: an InternalNetworkService/UpdateStatus functionality whose
+// .proto carries no (google.api.http) annotation. arch-gen's L3 artifact
+// must row the RPC with an em-dash REST cell.
+func SpecGenRPCContractInternal() Spec {
+	s := grpcServiceBase("example.com/geninternal", []string{"UpdateStatus"})
+	// The synthetic kacho-proto names the service InternalNetworkService;
+	// the in-repo gRPC stub must register the same FQN so the anchor and
+	// the proto RPC line up.
+	s.Services[0].FQN = "kacho.cloud.vpc.v1.InternalNetworkService"
+	s.MainBody = "grpcServer := grpcstub.NewServer()\n" +
+		"pb.RegisterInternalNetworkServiceServer(grpcServer, handler.New())"
+	s.Files = map[string]string{
+		"internal/handler/handler.go": genInternalHandlerSource,
+		"internal/domain/domain.go":   rehome(genDomainSource, "", ""),
+		"internal/repo/repo.go":       genRepoSource,
+	}
+	s.Notes = []NoteSpec{{
+		File: "internal-lifecycle.md", Repo: "geninternal",
+		RPCAnchors: []string{"kacho.cloud.vpc.v1.InternalNetworkService/UpdateStatus"},
+		SourceSHA:  FreshSHA,
+		Body: "# Internal network lifecycle\n\n" +
+			"This curated L2 note anchors InternalNetworkService/UpdateStatus,\n" +
+			"an Internal RPC carrying no google.api.http annotation.\n",
+	}}
+	s.ProtoFiles = map[string]string{
+		"kacho/cloud/vpc/v1/internal_network_service.proto": genRPCContractInternalProto,
+	}
+	return s
+}
+
+// rehome rewrites every occurrence of an old module path segment with a new
+// one in fixture source. genHandlerSource imports "example.com/genbasic/…";
+// a fixture re-homed under a different module needs those import paths
+// rewritten. A bare ("","") request is a no-op passthrough used where the
+// source carries no module-qualified import (genDomainSource).
+func rehome(src, oldMod, newMod string) string {
+	if oldMod == "" || newMod == "" {
+		return src
+	}
+	return strings.ReplaceAll(src, oldMod, newMod)
 }

@@ -65,6 +65,7 @@ require (
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
+	github.com/yoheimuta/go-protoparser/v4 v4.14.2
 	go.opentelemetry.io/otel/trace v1.43.0
 	golang.org/x/tools v0.45.0
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260427160629-7cedc36a6bc4

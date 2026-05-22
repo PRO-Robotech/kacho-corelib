@@ -81,6 +81,7 @@ import (
 
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/entrypoints"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/note"
+	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/proto"
 	"github.com/PRO-Robotech/kacho-corelib/internal/archgraph/reach"
 )
 
@@ -135,6 +136,18 @@ func Generate(
 	// scoping C3's freshness hash applies to its file set).
 	repoPkgs := collectRepoPkgPaths(pkgs)
 
+	// rpcContract resolves the RPC contract surface — gRPC request/response
+	// shapes and REST verb/path per gRPC method — from the kacho-proto
+	// module this repository depends on. A repository with no resolvable
+	// kacho-proto module (corelib, the api-gateway, a library, or a test
+	// fixture without ProtoFiles) yields an empty index; renderL3 then
+	// emits an "unresolved" RPC contract section instead of a table. A
+	// genuinely malformed .proto checkout is a hard error.
+	rpcContract, contractResolved, err := loadRPCContract(repoRoot)
+	if err != nil {
+		return err
+	}
+
 	// artifacts is the set of file base names arch-gen is about to write —
 	// the input to stale-removal.
 	artifacts := map[string]struct{}{}
@@ -146,7 +159,7 @@ func Generate(
 			continue
 		}
 		base := l3FileName(n)
-		content := renderL3(n, g, exported, names, repoPkgs)
+		content := renderL3(n, g, exported, names, repoPkgs, rpcContract, contractResolved)
 		if err := writeArtifact(outDir, base, content); err != nil {
 			return err
 		}
@@ -208,6 +221,8 @@ func renderL3(
 	exported map[string]exportedFunc,
 	names map[*ast.FuncDecl]string,
 	repoPkgs map[string]struct{},
+	rpcContract map[string]proto.RPC,
+	contractResolved bool,
 ) string {
 	var b strings.Builder
 	b.WriteString(genMarker + "\n\n")
@@ -221,6 +236,12 @@ func renderL3(
 		fmt.Fprintf(&b, "- `%s`\n", a)
 	}
 	b.WriteString("\n")
+
+	// RPC contract — the gRPC request/response shape and REST verb/path of
+	// every rpc anchor of this functionality, recovered from the
+	// repository's kacho-proto module. Worker anchors carry no RPC
+	// contract and never appear here.
+	renderRPCContract(&b, n, rpcContract, contractResolved)
 
 	// Call-tree — the union of the reachable-sets of every anchor, scoped
 	// to functions defined in this repository (stdlib and dependency
@@ -263,6 +284,124 @@ func anchorSymbols(n *note.Note) []string {
 		}
 	}
 	return sortedKeys(set)
+}
+
+// loadRPCContract resolves the RPC contract surface of the repository at
+// repoRoot: it follows the kacho-proto `replace` directive in the repo's
+// go.mod to the proto module on disk, parses every .proto file under its
+// proto/ tree and returns an index keyed by gRPC method FQN.
+//
+// resolved reports whether a kacho-proto module was found at all. A
+// repository with no kacho-proto dependency — corelib, the api-gateway, a
+// library, a fixture without ProtoFiles — resolves nothing: (nil, false,
+// nil). renderRPCContract then emits an "unresolved" section rather than a
+// table. A kacho-proto checkout whose .proto files do not parse is a
+// genuine defect and surfaces as a non-nil error.
+func loadRPCContract(repoRoot string) (index map[string]proto.RPC, resolved bool, err error) {
+	protoDir, ok := proto.ResolveProtoDir(repoRoot)
+	if !ok {
+		return nil, false, nil
+	}
+	rpcs, err := proto.Extract(protoDir)
+	if err != nil {
+		return nil, false, fmt.Errorf("arch-gen: extract RPC contract: %w", err)
+	}
+	index = make(map[string]proto.RPC, len(rpcs))
+	for _, r := range rpcs {
+		index[r.FQN] = r
+	}
+	return index, true, nil
+}
+
+// renderRPCContract writes the `## RPC contract` section of an L3 artifact:
+// a table rowing every rpc anchor of the note with its gRPC
+// request/response shape and its REST verb + path.
+//
+// The section is emitted only when the functionality has at least one rpc
+// anchor — a worker-only functionality carries no RPC contract. When the
+// repository has no resolvable kacho-proto module the table is replaced by
+// a single "proto module not resolved" line, so the section is still
+// deterministic and never a misleading empty table. An rpc anchor with no
+// matching proto rpc renders a row flagged "(contract not found)"; an rpc
+// with no (google.api.http) annotation renders an em-dash REST cell.
+func renderRPCContract(
+	b *strings.Builder,
+	n *note.Note,
+	index map[string]proto.RPC,
+	resolved bool,
+) {
+	rpcAnchors := rpcAnchorSymbols(n)
+	if len(rpcAnchors) == 0 {
+		// A worker-only functionality has no RPC contract surface.
+		return
+	}
+
+	b.WriteString("## RPC contract\n\n")
+
+	if !resolved {
+		b.WriteString("_proto module not resolved._\n\n")
+		return
+	}
+
+	b.WriteString("| RPC | gRPC | REST |\n")
+	b.WriteString("|-----|------|------|\n")
+	for _, fqn := range rpcAnchors {
+		r, ok := index[fqn]
+		if !ok {
+			fmt.Fprintf(b, "| %s | (contract not found) | — |\n", shortRPC(fqn))
+			continue
+		}
+		fmt.Fprintf(b, "| %s | %s | %s |\n",
+			shortRPC(fqn), grpcShape(r), restCell(r))
+	}
+	b.WriteString("\n")
+}
+
+// rpcAnchorSymbols returns the FQNs of a note's rpc anchors — worker
+// anchors excluded — sorted and de-duplicated, so the RPC contract table is
+// rendered in a deterministic order.
+func rpcAnchorSymbols(n *note.Note) []string {
+	set := map[string]struct{}{}
+	for _, a := range n.Anchors {
+		if a.IsRPC() {
+			set[a.RPC] = struct{}{}
+		}
+	}
+	return sortedKeys(set)
+}
+
+// shortRPC renders a gRPC method FQN as the "<Service>/<Method>" form used
+// in the RPC contract table's first column — the proto package prefix is
+// dropped, since every row of one functionality shares it. A FQN with no
+// "/" (a malformed anchor) is rendered verbatim.
+func shortRPC(fqn string) string {
+	slash := strings.LastIndex(fqn, "/")
+	if slash < 0 {
+		return fqn
+	}
+	method := fqn[slash:]
+	service := fqn[:slash]
+	if dot := strings.LastIndex(service, "."); dot >= 0 {
+		service = service[dot+1:]
+	}
+	return service + method
+}
+
+// grpcShape renders the gRPC request/response shape of an rpc as
+// "(<Request>) → <Response>" — the form the RPC contract table's gRPC
+// column carries.
+func grpcShape(r proto.RPC) string {
+	return "(" + r.Request + ") → " + r.Response
+}
+
+// restCell renders the REST column of an rpc's RPC contract row:
+// "<VERB> <path>" when the rpc carries a (google.api.http) annotation, the
+// em-dash "—" when it does not (every Internal-service method).
+func restCell(r proto.RPC) string {
+	if r.RESTVerb == "" {
+		return "—"
+	}
+	return r.RESTVerb + " " + r.RESTPath
 }
 
 // reachableFuncs returns the deterministically sorted union of the

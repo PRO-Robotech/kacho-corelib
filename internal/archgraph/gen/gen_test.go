@@ -362,6 +362,87 @@ func Test_archgen_L3CallTreeScopedToRepo(t *testing.T) {
 			"unscoped defect produced ~1.4 MB", len(l3))
 }
 
+// Test_archgen_L3RPCContractSection: an L3 artifact of a functionality
+// whose anchors are gRPC RPCs carries a `## RPC contract` section — a table
+// mapping each anchor RPC to its gRPC request/response shape and its REST
+// verb + path, recovered from the repo's kacho-proto .proto files.
+func Test_archgen_L3RPCContractSection(t *testing.T) {
+	root := runGen(t, archtest.SpecGenRPCContract())
+
+	l3 := readGenerated(t, root, "l3-network-lifecycle.md")
+
+	require.Contains(t, l3, "## RPC contract",
+		"an L3 artifact of an RPC-anchored functionality must carry the RPC contract section")
+
+	// The anchored Create RPC: gRPC request/response shape and POST verb.
+	require.Contains(t, l3, "NetworkService/Create",
+		"the RPC contract table must row the anchored Create RPC")
+	require.Contains(t, l3, "(CreateNetworkRequest) → operation.Operation",
+		"the RPC contract must render Create's gRPC request/response shape")
+	require.Contains(t, l3, "POST /vpc/v1/networks",
+		"the RPC contract must render Create's REST verb and path")
+}
+
+// Test_archgen_L3RPCContractRESTlessRPC: an anchored RPC carrying no
+// (google.api.http) annotation — the Internal-service shape — renders an
+// em-dash in the REST column rather than a verb+path.
+func Test_archgen_L3RPCContractRESTlessRPC(t *testing.T) {
+	root := runGen(t, archtest.SpecGenRPCContractInternal())
+
+	l3 := readGenerated(t, root, "l3-internal-lifecycle.md")
+
+	require.Contains(t, l3, "## RPC contract")
+	require.Contains(t, l3, "InternalNetworkService/UpdateStatus",
+		"the RPC contract table must row the anchored Internal RPC")
+	require.Contains(t, l3, "(UpdateStatusRequest) → UpdateStatusResponse",
+		"the RPC contract must render the Internal RPC's gRPC shape")
+
+	// The REST cell of the annotation-less RPC is an em-dash. The table row
+	// — distinct from the anchor bullet, which also names the RPC — is the
+	// "|"-delimited line whose first cell carries the RPC.
+	var restCell string
+	var foundRow bool
+	for _, ln := range strings.Split(l3, "\n") {
+		if !strings.HasPrefix(ln, "| ") ||
+			!strings.Contains(ln, "InternalNetworkService/UpdateStatus") {
+			continue
+		}
+		cells := strings.Split(ln, "|")
+		require.GreaterOrEqual(t, len(cells), 4,
+			"the RPC contract row must have RPC / gRPC / REST columns")
+		restCell = strings.TrimSpace(cells[3])
+		foundRow = true
+	}
+	require.True(t, foundRow, "the RPC contract table must carry the UpdateStatus row")
+	require.Equal(t, "—", restCell,
+		"an RPC with no google.api.http annotation must have an em-dash REST cell")
+}
+
+// Test_archgen_L3RPCContractNoProtoModule: a repo with no resolvable
+// kacho-proto module degrades gracefully — arch-gen still produces the L3
+// artifact and never panics; the RPC contract section, if present, is
+// marked as unresolved.
+func Test_archgen_L3RPCContractNoProtoModule(t *testing.T) {
+	// SpecGenBasic carries no ProtoFiles, hence no kacho-proto replace.
+	root := runGen(t, archtest.SpecGenBasic())
+
+	l3 := readGenerated(t, root, "l3-network-lifecycle.md")
+
+	// The artifact is still produced and well-formed.
+	require.True(t, strings.HasPrefix(l3, genHeader),
+		"the L3 artifact must still be generated when no proto module resolves")
+	require.Contains(t, l3, "## Call tree",
+		"the L3 artifact's existing sections must be unaffected")
+
+	// When an RPC contract section is emitted at all, it carries the
+	// "proto module not resolved" marker rather than a bogus table.
+	if strings.Contains(l3, "## RPC contract") {
+		idx := strings.Index(l3, "## RPC contract")
+		require.Contains(t, l3[idx:], "proto module not resolved",
+			"a no-proto repo's RPC contract section must be marked unresolved")
+	}
+}
+
 // snapshotGenerated records the content of every .md file under
 // docs/arch/generated/, keyed by base name.
 func snapshotGenerated(t *testing.T, root string) map[string]string {

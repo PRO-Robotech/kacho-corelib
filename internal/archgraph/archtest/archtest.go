@@ -72,6 +72,39 @@ type Spec struct {
 	// structural fields do not model. A Files entry never overwrites a
 	// structural file silently — a collision fails the test.
 	Files map[string]string
+
+	// ProtoFiles, when non-empty, declares a synthetic kacho-proto module
+	// the fixture repo depends on. Each entry is one .proto file keyed by
+	// its path relative to the kacho-proto module's proto/ directory, e.g.
+	// "kacho/cloud/vpc/v1/network_service.proto". The builder materialises
+	// a sibling kacho-proto module on disk (carrying the files under
+	// proto/) and adds the `require` + `replace
+	// github.com/PRO-Robotech/kacho-proto => <sibling>` directives to the
+	// fixture repo's go.mod — the layout archgraph's proto-contract
+	// extractor resolves through ResolveProtoDir. A Spec with no ProtoFiles
+	// produces no kacho-proto dependency at all (the no-proto-module case).
+	ProtoFiles map[string]string
+}
+
+// protoModulePath is the Go module path of Kachō's central proto module —
+// the path a ProtoFiles fixture requires and replaces.
+const protoModulePath = "github.com/PRO-Robotech/kacho-proto"
+
+// protoSiblingName is the directory name of the synthetic kacho-proto
+// module a ProtoFiles fixture materialises beside the fixture repo.
+const protoSiblingName = "kacho-proto"
+
+// ProtoModuleDir returns the proto/ directory of the synthetic kacho-proto
+// module BuildRepo materialised beside a fixture repo at root, and ok=true
+// when that directory exists. A fixture built without ProtoFiles has no
+// such sibling and yields ok=false.
+func ProtoModuleDir(root string) (dir string, ok bool) {
+	d := filepath.Join(filepath.Dir(root), protoSiblingName, "proto")
+	info, err := os.Stat(d)
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+	return d, true
 }
 
 // ServiceSpec declares one gRPC service exposed by the fixture.
@@ -162,7 +195,22 @@ func BuildRepo(t *testing.T, spec Spec) string {
 		t.Fatalf("archtest: Spec.Module is required")
 	}
 
-	root := t.TempDir()
+	// A fixture with a synthetic kacho-proto module needs the proto sibling
+	// to live beside the repo root. The repo is therefore nested one level
+	// down (<tempdir>/repo) so the sibling (<tempdir>/kacho-proto) cannot
+	// collide with the repo or a second BuildRepo in the same test. A
+	// proto-less fixture keeps the historical layout — root == t.TempDir()
+	// — so the existing 24 fixtures are byte-unaffected.
+	temp := t.TempDir()
+	root := temp
+	if len(spec.ProtoFiles) > 0 {
+		root = filepath.Join(temp, "repo")
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatalf("archtest: mkdir repo root: %v", err)
+		}
+		writeProtoModule(t, filepath.Join(temp, protoSiblingName), spec.ProtoFiles)
+	}
+
 	files := map[string]string{}
 
 	put := func(path, content string) {
@@ -172,8 +220,13 @@ func BuildRepo(t *testing.T, spec Spec) string {
 		files[path] = content
 	}
 
-	// go.mod — emitted once, from a single template.
-	put("go.mod", goMod(spec.Module))
+	// go.mod — emitted once, from a single template. A ProtoFiles fixture
+	// gets the kacho-proto require + replace directives appended.
+	if len(spec.ProtoFiles) > 0 {
+		put("go.mod", goModWithProto(spec.Module))
+	} else {
+		put("go.mod", goMod(spec.Module))
+	}
 
 	usesGRPC := len(spec.Services) > 0
 
@@ -248,6 +301,36 @@ func goMod(module string) string {
 // GOTOOLCHAIN=local on any Go >= 1.21 — do not bump.
 go 1.21
 `, module)
+}
+
+// goModWithProto renders the go.mod of a fixture that depends on the
+// synthetic kacho-proto module: the standard fixture go.mod plus the
+// `require` and `replace` directives pointing kacho-proto at the sibling
+// module BuildRepo materialised one directory up. The fixture imports no Go
+// symbol from kacho-proto — only archgraph's proto-contract extractor reads
+// its .proto files via the replace target — so the require version is the
+// inert v0.0.0 and the package never has to compile.
+func goModWithProto(module string) string {
+	return goMod(module) + fmt.Sprintf(`
+require %s v0.0.0
+
+replace %s => ../%s
+`, protoModulePath, protoModulePath, protoSiblingName)
+}
+
+// writeProtoModule materialises the synthetic kacho-proto module at dir: a
+// minimal go.mod plus every declared .proto file under proto/. The .proto
+// files are inert data archgraph parses textually; the module is never
+// compiled, so its go.mod carries only the module directive.
+func writeProtoModule(t *testing.T, dir string, protoFiles map[string]string) {
+	t.Helper()
+	files := map[string]string{
+		"go.mod": fmt.Sprintf("module %s\n\ngo 1.21\n", protoModulePath),
+	}
+	for rel, content := range protoFiles {
+		files[filepath.ToSlash(filepath.Join("proto", rel))] = content
+	}
+	writeAll(t, dir, files)
 }
 
 // grpcStubSource is the single source of the offline google.golang.org/grpc

@@ -83,3 +83,41 @@ func TestBuildRepo_NotesWritten(t *testing.T) {
 	require.Contains(t, string(data), "level: functionality")
 	require.Contains(t, string(data), "rpc: kacho.cloud.vpc.v1.NetworkService/Create")
 }
+
+// TestBuildRepo_ProtoModuleSibling: a Spec carrying ProtoFiles materialises
+// a synthetic kacho-proto sibling module with the .proto files under
+// proto/, and the fixture repo's go.mod replaces kacho-proto with that
+// sibling — the layout archgraph's proto-contract extractor resolves.
+func TestBuildRepo_ProtoModuleSibling(t *testing.T) {
+	root := archtest.BuildRepo(t, archtest.Spec{
+		Module: "example.com/at-proto",
+		Services: []archtest.ServiceSpec{{
+			FQN:     "kacho.cloud.vpc.v1.NetworkService",
+			Methods: []string{"Create"},
+		}},
+		ProtoFiles: map[string]string{
+			"kacho/cloud/vpc/v1/network_service.proto": "syntax = \"proto3\";\n" +
+				"package kacho.cloud.vpc.v1;\n" +
+				"service NetworkService {\n" +
+				"  rpc Create (CreateNetworkRequest) returns (Operation);\n" +
+				"}\n",
+		},
+	})
+
+	// The fixture's go.mod must replace kacho-proto with the sibling.
+	goMod, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	require.NoError(t, err)
+	require.Contains(t, string(goMod), "github.com/PRO-Robotech/kacho-proto",
+		"a ProtoFiles fixture must require kacho-proto")
+	require.Contains(t, string(goMod), "replace github.com/PRO-Robotech/kacho-proto",
+		"a ProtoFiles fixture must replace kacho-proto with the synthetic sibling")
+
+	// The synthetic kacho-proto sibling must carry the .proto file under
+	// proto/, reachable from the fixture root via the replace target.
+	protoDir, ok := archtest.ProtoModuleDir(root)
+	require.True(t, ok, "the synthetic kacho-proto sibling must be resolvable")
+	protoFile := filepath.Join(protoDir, "kacho", "cloud", "vpc", "v1", "network_service.proto")
+	data, err := os.ReadFile(protoFile)
+	require.NoError(t, err, "the synthetic .proto file must exist under proto/")
+	require.Contains(t, string(data), "service NetworkService")
+}
