@@ -84,6 +84,19 @@ type RPCEntry struct {
 	// tenant-authz. Mapping в `DecisionInternal` (skip) — общий, но смысл
 	// разный, поэтому отдельное поле.
 	ScopeFiltered bool
+
+	// Permission — строка из permission-catalog в формате
+	// `<module>.<resource>.<verb>` (напр. `loadbalancer.networkLoadBalancers.start`),
+	// предназначена для будущего fine-grained Check (Step B, deferred to
+	// kacho-iam team).
+	//
+	// Сейчас interceptor её НЕ читает — Check идёт по полю Relation как
+	// раньше. Permission заполняется параллельно в per-service
+	// PermissionMap'ах, чтобы при переключении на fine-grained model
+	// (relation → permission per RPC) был drop-in путь без переписывания
+	// proto-stubs / extractors. Optional: zero-value ("") допустим и
+	// означает «пока не каталогизировано».
+	Permission string
 }
 
 // RPCMap — карта `<FullMethod>` → RPCEntry. Передаётся в Interceptor.
