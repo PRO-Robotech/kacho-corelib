@@ -134,10 +134,9 @@ type claimedRow struct {
 	eventType    string
 	payload      []byte
 	attemptCount int
-	// tx — pgx-transaction, держит row-lock; ОБЯЗАН быть Commit'нут или
-	// Rollback'нут вызывающим кодом. Если nil — claim не выдал row (limit=0
-	// или пусто) и tx уже rollback'нут.
-	tx pgx.Tx
+	// Note: the pgx.Tx that holds the row-lock is returned by claimRows
+	// alongside the []claimedRow batch (whole batch shares one tx). We don't
+	// store tx per-row because that would suggest per-row independence.
 }
 
 // claimRows — атомарный pre-claim до `limit` pending rows.

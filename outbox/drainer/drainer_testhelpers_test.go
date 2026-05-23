@@ -334,8 +334,5 @@ func derefStr(p *string) string {
 	return *p
 }
 
-// errSentinelOnce is a tiny helper to build error-sequence one-shots.
-func errSentinelOnce(err error) []error { return []error{err} }
-
 // sentinel used to assert "this is the kind of error we injected".
 var errTestTransient = errors.New("test: simulated transient")
