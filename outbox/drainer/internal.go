@@ -11,6 +11,18 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// shutdownCtx returns a bounded context that survives parent ctx cancellation
+// (for finalising in-flight work during graceful shutdown) but won't hang
+// forever if the DB is unreachable. ApplyTimeout (default 5s) is the bound.
+//
+// Use for tx.Commit / tx.Rollback / conn.Close — operations that must run to
+// completion even after parent ctx cancel, but whose synchronous calls on a
+// dead Postgres backend would otherwise block forever and defeat graceful
+// shutdown.
+func (d *Drainer[T]) shutdownCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), d.cfg.ApplyTimeout)
+}
+
 // listenLoop держит dedicated LISTEN-connection (hijacked из pool),
 // слушает NOTIFY и сигналит wakeup-channel на каждое сообщение.
 // При conn-drop — переоткрывает с exp-backoff (1s → 30s cap).
@@ -64,7 +76,19 @@ func (d *Drainer[T]) listenOnce(ctx context.Context, wakeup chan<- struct{}) err
 		return fmt.Errorf("pool.Acquire: %w", err)
 	}
 	conn := pconn.Hijack()
-	defer func() { _ = conn.Close(context.Background()) }()
+	defer func() {
+		// parent is context.Background() (not the live ctx) because Run's ctx
+		// may already be Done when this defer fires — we still want the close
+		// attempt to have a real deadline, not block forever on a dead backend.
+		closeCtx, cancel := d.shutdownCtx(context.Background())
+		defer cancel()
+		if err := conn.Close(closeCtx); err != nil {
+			// Close-failure on a hijacked conn means the backend didn't
+			// terminate cleanly — may leak a PG backend until
+			// idle_in_transaction_session_timeout fires server-side.
+			d.logger.Debug("listen_conn_close_failed", slog.String("err", err.Error()))
+		}
+	}()
 
 	if _, err := conn.Exec(ctx, "LISTEN "+d.cfg.Channel); err != nil {
 		return fmt.Errorf("LISTEN: %w", err)
@@ -140,6 +164,14 @@ func (d *Drainer[T]) claimRows(ctx context.Context, limit int) ([]claimedRow, pg
 		return nil, nil, fmt.Errorf("begin claim tx: %w", err)
 	}
 
+	// rollback closure — bounded shutdown-tolerant ctx so a dead Postgres
+	// backend cannot hang error paths indefinitely (graceful-shutdown safety).
+	rollback := func() {
+		rbCtx, cancel := d.shutdownCtx(ctx)
+		defer cancel()
+		_ = tx.Rollback(rbCtx)
+	}
+
 	q := fmt.Sprintf(`
 		UPDATE %s
 		   SET attempt_count = attempt_count + 1
@@ -155,7 +187,7 @@ func (d *Drainer[T]) claimRows(ctx context.Context, limit int) ([]claimedRow, pg
 
 	rows, err := tx.Query(ctx, q, d.cfg.MaxAttempts, limit)
 	if err != nil {
-		_ = tx.Rollback(context.Background())
+		rollback()
 		return nil, nil, fmt.Errorf("claim query: %w", err)
 	}
 
@@ -164,20 +196,20 @@ func (d *Drainer[T]) claimRows(ctx context.Context, limit int) ([]claimedRow, pg
 		var r claimedRow
 		if err := rows.Scan(&r.id, &r.eventType, &r.payload, &r.attemptCount); err != nil {
 			rows.Close()
-			_ = tx.Rollback(context.Background())
+			rollback()
 			return nil, nil, fmt.Errorf("claim scan: %w", err)
 		}
 		out = append(out, r)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		_ = tx.Rollback(context.Background())
+		rollback()
 		return nil, nil, fmt.Errorf("claim rows: %w", err)
 	}
 
 	if len(out) == 0 {
 		// Пусто — закрываем tx сразу, никакого row-lock не держим.
-		_ = tx.Rollback(context.Background())
+		rollback()
 		return nil, nil, nil
 	}
 	return out, tx, nil
@@ -286,11 +318,16 @@ func (d *Drainer[T]) drainBatch(ctx context.Context) {
 				needsRetryAfter = true
 			}
 		}
-		if err := tx.Commit(context.Background()); err != nil {
+		// Bounded shutdown-tolerant ctx for commit: survives parent ctx cancel
+		// (we must finalise the in-flight batch) but won't hang forever if the
+		// Postgres backend is dead.
+		commitCtx, commitCancel := d.shutdownCtx(ctx)
+		if err := tx.Commit(commitCtx); err != nil {
 			// Commit fail — все sent_at-mark'и потеряны → row'ы остаются
 			// pending (attempt_count уже инкрементнут). Будут переклейм'ены.
 			d.logger.Warn("commit_batch_failed", slog.String("err", err.Error()))
 		}
+		commitCancel()
 
 		// Если транзитные ошибки — sleep backoff чтобы не загрузить FGA
 		// серией мгновенных retry-ев. Используем attempt_count первой row.

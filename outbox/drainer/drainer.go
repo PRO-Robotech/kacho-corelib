@@ -165,8 +165,11 @@ func (d *Drainer[T]) Run(ctx context.Context) error {
 	// момент busy — он перепроверит после возврата.
 	wakeup := make(chan struct{}, 1)
 
-	// LISTEN-goroutine: own its own ctx tied to parent. Errors are logged with
-	// reconnect — fatal errors (panic) propagate via recover-in-goroutine + log.
+	// LISTEN-goroutine: own its own ctx tied to parent. Errors from LISTEN
+	// subscription (conn drop, NOTIFY parse) are caught and re-tried with
+	// exp-backoff inside listenLoop. Panics propagate to the runtime — drainer
+	// is process-fatal on unhandled panic (correct: such panics indicate
+	// programmer error, not transient infra failure).
 	listenDone := make(chan struct{})
 	go func() {
 		defer close(listenDone)
