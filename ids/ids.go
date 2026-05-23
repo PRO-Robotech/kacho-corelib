@@ -55,11 +55,25 @@ const (
 	PrefixImage    = "fd8"
 	PrefixSnapshot = "fd8"
 
+	// nlb: LoadBalancer/Listener/TargetGroup получают каждый свой 3-char
+	// префикс — opsproxy в api-gateway маршрутизирует по PrefixOperationNLB
+	// (== PrefixLoadBalancer), но resource-prefix у Listener/TargetGroup
+	// отдельный, чтобы id-парсеры могли отличать тип ресурса по prefix-у
+	// (в отличие от vpc, где Subnet/Address делят `e9b` — там тип
+	// определяется контекстом URL-path). GlobalLoadBalancer зарезервирован
+	// под будущий AWS-style composition layer (см. NLB design doc, "Future
+	// TODO"); сейчас не используется ни одним handler-ом.
+	PrefixLoadBalancer       = "nlb"
+	PrefixListener           = "lst"
+	PrefixTargetGroup        = "tgr"
+	PrefixGlobalLoadBalancer = "glb"
+
 	// Operation prefix per service-domain — совпадает с префиксом
 	// «головного» ресурса домена (по convention reference-API).
-	PrefixOperationRM      = PrefixCloud    // resource-manager: b1g
-	PrefixOperationVPC     = PrefixNetwork  // vpc: enp
-	PrefixOperationCompute = PrefixInstance // compute: epd
+	PrefixOperationRM      = PrefixCloud        // resource-manager: b1g
+	PrefixOperationVPC     = PrefixNetwork      // vpc: enp
+	PrefixOperationCompute = PrefixInstance     // compute: epd
+	PrefixOperationNLB     = PrefixLoadBalancer // nlb: nlb
 )
 
 // NewID возвращает идентификатор формата "<prefix><17-char crockford-base32>"

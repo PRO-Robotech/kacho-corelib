@@ -72,10 +72,34 @@ func TestHasKnownPrefix_AcceptsValid(t *testing.T) {
 		PrefixCloud, PrefixFolder, PrefixOrganization,
 		PrefixNetwork, PrefixSubnet, PrefixAddress,
 		PrefixRouteTable, PrefixSecurityGroup,
+		PrefixLoadBalancer, PrefixListener, PrefixTargetGroup,
+		PrefixGlobalLoadBalancer,
 	} {
 		id := NewID(p)
 		require.True(t, HasKnownPrefix(id), "id=%q (prefix=%q)", id, p)
 	}
+}
+
+// NLB-prefixes должны проходить per-prefix IsValid и иметь корректную длину
+// (20 chars). PrefixOperationNLB — alias на PrefixLoadBalancer, поэтому
+// проверяем, что id, сгенерированный одним, валидируется как другой
+// (api-gateway opsproxy маршрутизирует по этому свойству).
+func TestIsValid_NLBPrefixes(t *testing.T) {
+	for _, p := range []string{
+		PrefixLoadBalancer, PrefixListener, PrefixTargetGroup,
+		PrefixGlobalLoadBalancer,
+	} {
+		id := NewID(p)
+		require.Len(t, id, 20, "prefix=%q", p)
+		require.True(t, IsValid(id, p), "id=%q (prefix=%q)", id, p)
+	}
+}
+
+func TestPrefixOperationNLB_AliasesLoadBalancer(t *testing.T) {
+	require.Equal(t, PrefixLoadBalancer, PrefixOperationNLB,
+		"opsproxy в api-gateway полагается на этот alias")
+	id := NewID(PrefixOperationNLB)
+	require.True(t, IsValid(id, PrefixLoadBalancer))
 }
 
 func TestHasKnownPrefix_RejectsBadShape(t *testing.T) {
