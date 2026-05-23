@@ -114,10 +114,9 @@ func startDrainer(
 }
 
 // drainerPool is the pool interface the drainer is expected to consume.
-// We alias `*pgxpool.Pool` directly here — the impl is free to take a narrower
-// interface; if it does, we wrap in the GREEN phase. For RED, the symbol
-// drainer.New is what fails — pool shape is irrelevant to compile-error.
-type drainerPool = interface{} // placeholder; impl will narrow this
+// GREEN-phase: aliased to *pgxpool.Pool — drainer.New takes a concrete
+// pgxpool.Pool (LISTEN-conn is Hijack'ed from it per OQ-W1.1-6).
+type drainerPool = *pgxpool.Pool
 
 // ── 6.1 Functional happy paths ──────────────────────────────────────────────
 
