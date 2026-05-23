@@ -123,6 +123,11 @@ const (
 	DecisionInternal
 	// DecisionRateLimited — превышен per-Principal rate limit on denied storm.
 	DecisionRateLimited
+	// DecisionNoPath — FGA нет пути к ресурсу: ресурс, скорее всего, не существует
+	// (нет hierarchy-tuple). Interceptor пропускает вызов к handler'у, который
+	// вернёт NOT_FOUND из DB. Инициируется, когда CheckClient.Check() возвращает
+	// ErrNoPath.
+	DecisionNoPath
 )
 
 // String — human-readable representation, используется в метриках / логах.
@@ -140,6 +145,8 @@ func (d Decision) String() string {
 		return "internal"
 	case DecisionRateLimited:
 		return "rate_limited"
+	case DecisionNoPath:
+		return "no_path"
 	}
 	return "unknown"
 }
@@ -150,6 +157,16 @@ var ErrUnmapped = errors.New("authz: RPC not mapped in PermissionMap")
 
 // ErrUnavailable — FGA / kacho-iam.Check недоступны. fail-closed default.
 var ErrUnavailable = errors.New("authz: check service unavailable")
+
+// ErrNoPath — CheckClient.Check() sentinel: FGA вернул allowed=false с
+// причиной "no path" (нет hierarchy-tuple для объекта). Означает: ресурс
+// либо не существует, либо tuple ещё не записан. Interceptor интерпретирует
+// это как DecisionNoPath и пропускает RPC к handler'у, который вернёт
+// NOT_FOUND из DB.
+//
+// Используется только клиентами, которые имеют доступ к полю `reason`
+// в CheckResponse (kacho-compute, kacho-vpc). Другие клиенты могут игнорировать.
+var ErrNoPath = errors.New("authz: no FGA path to resource")
 
 // FormatObject форматирует FGA-object string: "<type>:<id>".
 // Возвращает err если type/id содержат запрещённые символы (':', whitespace).
