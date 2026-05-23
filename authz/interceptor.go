@@ -112,7 +112,7 @@ func (i *Interceptor) Unary() grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		dec, err := i.authorize(ctx, info.FullMethod, req)
 		switch dec {
-		case DecisionAllowed:
+		case DecisionAllowed, DecisionNoPath:
 			return handler(ctx, req)
 		case DecisionDenied:
 			return nil, status.Error(codes.PermissionDenied, "permission denied")
@@ -157,7 +157,7 @@ func (i *Interceptor) Stream() grpc.StreamServerInterceptor {
 		// extractor явно проектирует request'-less проверку.
 		dec, err := i.authorize(ss.Context(), info.FullMethod, nil)
 		switch dec {
-		case DecisionAllowed, DecisionInternal:
+		case DecisionAllowed, DecisionInternal, DecisionNoPath:
 			return handler(srv, ss)
 		case DecisionDenied:
 			return status.Error(codes.PermissionDenied, "permission denied")
@@ -274,6 +274,17 @@ func (i *Interceptor) authorize(ctx context.Context, fullMethod string, req any)
 	defer cancel()
 	allowed, err := i.opts.Client.Check(cctx, subjectFGA, entry.Relation, object)
 	if err != nil {
+		if errors.Is(err, ErrNoPath) {
+			// No FGA hierarchy tuple for this object → resource likely does not
+			// exist. Let the handler run: it will return NOT_FOUND from the DB.
+			// This prevents authz from masking NOT_FOUND as 403 PermissionDenied.
+			atomic.AddUint64(&i.allowedTotal, 1)
+			logger.Info("authz_no_path_passthrough",
+				slog.String("subject", subjectFGA),
+				slog.String("relation", entry.Relation),
+				slog.String("object", object))
+			return DecisionNoPath, nil
+		}
 		atomic.AddUint64(&i.unavailableTotal, 1)
 		logger.Error("authz_check_unavailable",
 			slog.String("subject", subjectFGA),
