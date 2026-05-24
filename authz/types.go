@@ -171,6 +171,18 @@ var ErrUnmapped = errors.New("authz: RPC not mapped in PermissionMap")
 // ErrUnavailable — FGA / kacho-iam.Check недоступны. fail-closed default.
 var ErrUnavailable = errors.New("authz: check service unavailable")
 
+// ErrPermissionDenied — FGA / kacho-iam отвергли запрос (gRPC PermissionDenied).
+// Семантически отличается от ErrUnavailable: это легитимный denial subject'а,
+// а НЕ инфраструктурная недоступность. Caller должен мапить на gRPC
+// PermissionDenied (HTTP 403), а не Unavailable (HTTP 503) — иначе клиент
+// (UI / SDK) не отличит "у тебя нет прав" от "сервис не работает", и retry-логика
+// сделает хуже.
+//
+// KAC-178 §1: до этого изменения listobjects.go оборачивал PermissionDenied
+// в ErrUnavailable через `fmt.Errorf("%w: %v", ErrUnavailable, err)` —
+// gRPC-код терялся в `%v`-formatting, caller'ы вынужденно возвращали 503.
+var ErrPermissionDenied = errors.New("authz: permission denied")
+
 // ErrNoPath — CheckClient.Check() sentinel: FGA вернул allowed=false с
 // причиной "no path" (нет hierarchy-tuple для объекта). Означает: ресурс
 // либо не существует, либо tuple ещё не записан. Interceptor интерпретирует

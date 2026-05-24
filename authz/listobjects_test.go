@@ -6,6 +6,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // fakeClient — счётчик вызовов + программируемые ответы.
@@ -80,6 +83,35 @@ func TestListObjects_ClientErrorReturnsUnavailable(t *testing.T) {
 	ids, err := svc.ListAllowedIDs(context.Background(), "user:usr_alice", "vpc_network", "vpc.networks.read", ListAllowedIDsOptions{})
 	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("err = %v, want ErrUnavailable", err)
+	}
+	if errors.Is(err, ErrPermissionDenied) {
+		t.Fatalf("err = %v, generic infra error must NOT wrap ErrPermissionDenied", err)
+	}
+	if ids != nil {
+		t.Fatalf("ids = %v, want nil on err", ids)
+	}
+}
+
+// KAC-178 §1: PermissionDenied от kacho-iam НЕ должен wrap'аться в ErrUnavailable
+// (caller получит 503 вместо 403 — UI/SDK не отличат "нет прав" от "сервис мёртв",
+// retry-логика сделает хуже). До fix'а listobjects.go блиндово оборачивал любой
+// upstream error в ErrUnavailable через `fmt.Errorf("%w: %v", ErrUnavailable, err)`,
+// gRPC-код терялся.
+func TestListObjects_PermissionDeniedFromIAM_ReturnsPermissionDeniedSentinel(t *testing.T) {
+	pdErr := status.Error(codes.PermissionDenied, "permission denied")
+	client := &fakeClient{
+		fn: func(_ context.Context, _ ListObjectsRequest) (ListObjectsResponse, error) {
+			return ListObjectsResponse{}, pdErr
+		},
+	}
+	svc := newSvc(t, client)
+
+	ids, err := svc.ListAllowedIDs(context.Background(), "user:usr_alice", "vpc_network", "vpc.networks.read", ListAllowedIDsOptions{})
+	if !errors.Is(err, ErrPermissionDenied) {
+		t.Fatalf("err = %v, want ErrPermissionDenied sentinel", err)
+	}
+	if errors.Is(err, ErrUnavailable) {
+		t.Fatalf("err = %v, PermissionDenied MUST NOT wrap ErrUnavailable (caller's 503-vs-403 split)", err)
 	}
 	if ids != nil {
 		t.Fatalf("ids = %v, want nil on err", ids)

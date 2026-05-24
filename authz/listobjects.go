@@ -60,6 +60,9 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // ListObjectsClient — port-интерфейс для kacho-iam AuthorizeService.ListObjects.
@@ -231,7 +234,15 @@ func (s *ListObjectsService) ListAllowedIDs(
 			AuthzModelID: modelID,
 		})
 		if err != nil {
-			// Fail-closed: возвращаем sentinel (caller маппит на gRPC Unavailable).
+			// KAC-178 §1: разделяем PermissionDenied (легитимный denial → 403)
+			// от Unavailable (infra недоступна → 503). До этого fix'а оба
+			// сваливались в ErrUnavailable, и стенд возвращал UI 503 на cases
+			// где FGA model просто не имела пути для subject (что должно быть
+			// 403 — "у тебя нет прав", а не "сервис сломан").
+			if status.Code(err) == codes.PermissionDenied {
+				return nil, fmt.Errorf("%w: %v", ErrPermissionDenied, err)
+			}
+			// Fail-closed default: всё остальное (timeout, connection-refused, …) → Unavailable.
 			return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 		}
 		allIDs = append(allIDs, resp.ResourceIDs...)
