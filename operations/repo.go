@@ -74,11 +74,43 @@ func (r *pgRepo) tableName() string {
 // CreateWithPrincipal либо предварительно заполнить op.Principal и вызывать
 // CreateWithPrincipal(ctx, op, op.Principal).
 func (r *pgRepo) Create(ctx context.Context, op Operation) error {
-	// Если op.Principal заполнен (например, явно set'нут helper'ом New) —
-	// уважаем; иначе fallback к SystemPrincipal.
+	// Priority order (KAC-178 §2 follow-up):
+	//   1. op.Principal — явно set'нут через NewFromContext / CreateWithPrincipal.
+	//   2. PrincipalFromContext(ctx) — реальный Principal от UnaryPrincipalExtract.
+	//   3. SystemPrincipal() — fallback (системные операции, бутстрап, миграции).
+	//
+	// До KAC-178 §2 follow-up Create читал ТОЛЬКО op.Principal и fallback'ал
+	// сразу на SystemPrincipal. Use-case'ы, которые звали operations.New(...) —
+	// БЕЗ NewFromContext-варианта (36 callsites в kacho-vpc + аналогично в
+	// kacho-compute) — получали op.Principal=zero → запись с
+	// principalType="system" principalId="bootstrap" / created_by="anonymous",
+	// независимо от того что api-gateway передавал реальный
+	// x-kacho-principal-* MD и сервер успешно extract'ил его в ctx через
+	// grpcsrv.UnaryPrincipalExtract.
+	//
+	// Этот fallback на ctx делает Principal-propagation работающим без
+	// массовой замены operations.New → operations.NewFromContext во всех
+	// use-case'ах.
 	p := op.Principal
+	fromCtx := false
 	if p == (Principal{}) {
-		p = SystemPrincipal()
+		// ctxPrincipalFromContext возвращает Principal{} только если в ctx
+		// был явный WithPrincipal — иначе SystemPrincipal-fallback. Проверяем
+		// по type: "system" значит fallback (ctx без auth-interceptor'а),
+		// любой другой type — реальный extract'ed Principal.
+		ctxP := PrincipalFromContext(ctx)
+		if ctxP.Type != "" && ctxP.Type != "system" {
+			p = ctxP
+			fromCtx = true
+		} else {
+			p = SystemPrincipal()
+		}
+	}
+	// Sync CreatedBy с реальным principal.ID (legacy column для
+	// backward-compat read'ов). Только если Principal пришёл из ctx
+	// (не system-fallback) — иначе оставляем "anonymous" как было.
+	if fromCtx && op.CreatedBy == "anonymous" && p.ID != "" {
+		op.CreatedBy = p.ID
 	}
 	return r.CreateWithPrincipal(ctx, op, p)
 }
