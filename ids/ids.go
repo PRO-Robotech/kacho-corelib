@@ -36,16 +36,15 @@ const totalLen = 3 + idBodyLen
 // PrefixNetwork (enp…). Это позволяет gateway-у одной таблицей
 // маршрутизировать и Operation.Get, и любые ресурсные RPC.
 const (
-	PrefixCloud           = "b1g"
-	PrefixFolder          = "b1g"
-	PrefixOrganization    = "bpf"
-	PrefixNetwork         = "enp"
-	PrefixSubnet          = "e9b"
-	PrefixAddress         = "e9b"
-	PrefixRouteTable      = "enp"
-	PrefixSecurityGroup   = "enp"
-	PrefixGateway         = "enp"
-	PrefixPrivateEndpoint = "enp"
+	PrefixCloud         = "b1g"
+	PrefixFolder        = "b1g"
+	PrefixOrganization  = "bpf"
+	PrefixNetwork       = "enp"
+	PrefixSubnet        = "e9b"
+	PrefixAddress       = "e9b"
+	PrefixRouteTable    = "enp"
+	PrefixSecurityGroup = "enp"
+	PrefixGateway       = "enp"
 
 	// compute: Instance/Disk делят `epd`, Image/Snapshot делят `fd8` (зеркалит
 	// VPC-группировку); все compute-операции получают `epd` (== PrefixInstance),
