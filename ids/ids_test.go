@@ -71,7 +71,8 @@ func TestHasKnownPrefix_AcceptsValid(t *testing.T) {
 	for _, p := range []string{
 		PrefixCloud, PrefixFolder, PrefixOrganization,
 		PrefixNetwork, PrefixSubnet, PrefixAddress,
-		PrefixRouteTable, PrefixSecurityGroup,
+		PrefixRouteTable, PrefixSecurityGroup, PrefixGateway,
+		PrefixNetworkInterface, PrefixAddressPool,
 		PrefixLoadBalancer, PrefixListener, PrefixTargetGroup,
 		PrefixGlobalLoadBalancer,
 	} {
@@ -112,4 +113,45 @@ func TestNewUID_LegacyShapeStable(t *testing.T) {
 	uid := NewUID()
 	require.Len(t, uid, 20)
 	require.True(t, strings.HasPrefix(uid, "rev"), "legacy NewUID has rev-prefix sentinel")
+}
+
+// TestVPCResourcePrefixes_DistinctKAC271 — KAC-271: каждый VPC-ресурс получает
+// СВОЙ 3-char prefix (раньше Network/RouteTable/SecurityGroup/Gateway делили
+// `enp`, Subnet/Address/NetworkInterface делили `e9b`). Operation-prefix VPC
+// остаётся отдельным (`enp`) — gateway opsproxy маршрутизирует Operation.Get
+// по нему, поэтому он не должен совпадать ни с одним ресурсным.
+func TestVPCResourcePrefixes_DistinctKAC271(t *testing.T) {
+	require.Equal(t, "net", PrefixNetwork)
+	require.Equal(t, "sub", PrefixSubnet)
+	require.Equal(t, "adr", PrefixAddress)
+	require.Equal(t, "rtb", PrefixRouteTable)
+	require.Equal(t, "sgr", PrefixSecurityGroup)
+	require.Equal(t, "gtw", PrefixGateway)
+	require.Equal(t, "nic", PrefixNetworkInterface)
+	require.Equal(t, "apl", PrefixAddressPool)
+
+	// 8 ресурсных префиксов VPC — попарно различны.
+	vpc := []string{
+		PrefixNetwork, PrefixSubnet, PrefixAddress, PrefixRouteTable,
+		PrefixSecurityGroup, PrefixGateway, PrefixNetworkInterface, PrefixAddressPool,
+	}
+	seen := map[string]bool{}
+	for _, p := range vpc {
+		require.Lenf(t, p, 3, "prefix %q must be 3 chars", p)
+		require.Falsef(t, seen[p], "duplicate VPC resource prefix %q", p)
+		seen[p] = true
+	}
+
+	// Operation-prefix VPC — отдельный, routable в gateway opsproxy, и НЕ
+	// совпадает ни с одним ресурсным VPC-префиксом.
+	require.Equal(t, "enp", PrefixOperationVPC)
+	require.Falsef(t, seen[PrefixOperationVPC],
+		"PrefixOperationVPC %q must differ from every VPC resource prefix", PrefixOperationVPC)
+
+	// Сгенерированные id с новыми префиксами — валидной формы и known-prefix.
+	for _, p := range append(vpc, PrefixOperationVPC) {
+		id := NewID(p)
+		require.True(t, IsValid(id, p), "id %q must be valid for prefix %q", id, p)
+		require.True(t, HasKnownPrefix(id), "id %q must pass HasKnownPrefix", id)
+	}
 }
