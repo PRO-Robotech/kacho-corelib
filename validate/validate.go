@@ -309,11 +309,25 @@ func UpdateMask(field string, mask []string, known map[string]struct{}) error {
 }
 
 // resourceIDPrefixes — известные 3-символьные prefix'ы resource-id'ов Kachō
-// (из kacho-corelib/ids: Cloud/Folder=b1g, Organization=bpf, Network/RT/SG/GW/PE=enp,
-// Subnet/Address=e9b, Instance/Disk=epd, Image/Snapshot=fd8). Если появится новый
-// домен с новым prefix — добавить сюда.
+// (источник — kacho-corelib/ids). Если появится новый домен с новым prefix —
+// добавить сюда.
+//
+// VPC (KAC-271, per-ресурс): Network=net, Subnet=sub, Address=adr,
+// RouteTable=rtb, SecurityGroup=sgr, Gateway=gtw, NetworkInterface=nic,
+// AddressPool=apl. Op-root VPC = enp (PrefixOperationVPC, оставлен для
+// маршрутизации Operation.Get и backward-compat существующих enp-операций).
+//
+// Legacy/прочие домены: Cloud/Folder=b1g, Organization=bpf (resource-manager
+// упразднён, оставлены для legacy operation-id), Instance/Disk=epd,
+// Image/Snapshot=fd8. Старые enp/e9b остаются known — family-agnostic проверка
+// не должна давать InvalidArgument на корректные id переходного периода.
 var resourceIDPrefixes = map[string]struct{}{
-	"b1g": {}, "bpf": {}, "enp": {}, "e9b": {}, "epd": {}, "fd8": {},
+	// vpc (KAC-271 per-ресурс)
+	"net": {}, "sub": {}, "adr": {}, "rtb": {}, "sgr": {}, "gtw": {}, "nic": {}, "apl": {},
+	// vpc op-root + legacy общие vpc-префиксы (backward-compat)
+	"enp": {}, "e9b": {},
+	// compute + legacy resource-manager
+	"b1g": {}, "bpf": {}, "epd": {}, "fd8": {},
 }
 
 // ResourceID проверяет, что resource-id синтаксически валиден — начинается с

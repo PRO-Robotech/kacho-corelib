@@ -28,23 +28,36 @@ const totalLen = 3 + idBodyLen
 // Per-resource префиксы (3 символа, lowercase).
 //
 // Сгруппированы по домену:
-//   - resource-manager: cloud, folder, organization
-//   - vpc: network, subnet, address, route_table, security_group
+//   - resource-manager (legacy, упразднён в KAC-124): cloud, folder, organization
+//   - vpc: network, subnet, address, route_table, security_group, gateway,
+//     network_interface, address_pool
 //
-// Operation.id наследует префикс домена-владельца ресурса (как в
-// reference-API): RM-операции → PrefixCloud (b1g…), VPC-операции →
-// PrefixNetwork (enp…). Это позволяет gateway-у одной таблицей
-// маршрутизировать и Operation.Get, и любые ресурсные RPC.
+// KAC-271: каждый VPC-ресурс получает СВОЙ 3-char prefix (раньше
+// Network/RouteTable/SecurityGroup/Gateway делили `enp`, а
+// Subnet/Address/NetworkInterface — `e9b`). Тип ресурса теперь читается по id
+// (как в NLB-домене). Routing не ломается: resource-RPC маршрутизируются по
+// REST-path, а НЕ по id-prefix.
+//
+// Operation.id остаётся с ОТДЕЛЬНЫМ per-domain prefix (PrefixOperationVPC =
+// `enp`, PrefixOperationCompute = `epd`, …) — gateway opsproxy маршрутизирует
+// Operation.Get по первым 3 символам id, поэтому op-prefix должен быть
+// стабильным per-домен (а не per-ресурс).
 const (
 	PrefixCloud         = "b1g"
 	PrefixFolder        = "b1g"
 	PrefixOrganization  = "bpf"
-	PrefixNetwork       = "enp"
-	PrefixSubnet        = "e9b"
-	PrefixAddress       = "e9b"
-	PrefixRouteTable    = "enp"
-	PrefixSecurityGroup = "enp"
-	PrefixGateway       = "enp"
+	PrefixNetwork       = "net"
+	PrefixSubnet        = "sub"
+	PrefixAddress       = "adr"
+	PrefixRouteTable    = "rtb"
+	PrefixSecurityGroup = "sgr"
+	PrefixGateway       = "gtw"
+
+	// NetworkInterface и AddressPool — KAC-271: собственные prefix'ы. NIC раньше
+	// переиспользовал PrefixSubnet (`e9b`), AddressPool — литерал "apl" в
+	// kacho-vpc/addresspool. Теперь оба централизованы здесь.
+	PrefixNetworkInterface = "nic"
+	PrefixAddressPool      = "apl"
 
 	// compute: Instance/Disk делят `epd`, Image/Snapshot делят `fd8` (зеркалит
 	// VPC-группировку); все compute-операции получают `epd` (== PrefixInstance),
@@ -67,10 +80,15 @@ const (
 	PrefixTargetGroup        = "tgr"
 	PrefixGlobalLoadBalancer = "glb"
 
-	// Operation prefix per service-domain — совпадает с префиксом
-	// «головного» ресурса домена (по convention reference-API).
-	PrefixOperationRM      = PrefixCloud        // resource-manager: b1g
-	PrefixOperationVPC     = PrefixNetwork      // vpc: enp
+	// Operation prefix per service-domain — отдельный, стабильный per-домен
+	// prefix, по которому gateway opsproxy маршрутизирует Operation.Get.
+	//
+	// KAC-271: PrefixOperationVPC раньше был алиасом PrefixNetwork; после того
+	// как Network получил свой prefix `net`, op-prefix VPC ДЕКАПЛЕН и зафиксирован
+	// как `enp` (исходный vpc-op-root) — opsproxy.prefixToBackend["enp"]="vpc"
+	// остаётся неизменным, существующие enp-операции в БД продолжают роутиться.
+	PrefixOperationRM      = PrefixCloud        // resource-manager (legacy): b1g
+	PrefixOperationVPC     = "enp"              // vpc op-root (декаплен от PrefixNetwork в KAC-271)
 	PrefixOperationCompute = PrefixInstance     // compute: epd
 	PrefixOperationNLB     = PrefixLoadBalancer // nlb: nlb
 )
