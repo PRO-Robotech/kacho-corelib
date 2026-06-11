@@ -7,13 +7,19 @@ package grpcsrv_test
 
 import (
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 
 	"github.com/PRO-Robotech/kacho-corelib/grpcsrv"
+	"github.com/PRO-Robotech/kacho-corelib/operations"
 )
 
 func mustURIs(t *testing.T, raw ...string) []*url.URL {
@@ -87,4 +93,80 @@ func TestSECB15Unit_VerifiedCert_Carried(t *testing.T) {
 	got, verified := grpcsrv.CertIdentityFromContext(ctx)
 	require.Equal(t, id, got)
 	require.True(t, verified)
+}
+
+// SEC-B-16 (unit defense-in-depth): a TLS peer that REACHES the interceptor chain
+// WITHOUT a verified client-cert (credentials.TLSInfo present but empty
+// VerifiedChains) must NOT be trusted. RequireAndVerifyClientCert normally rejects
+// such a peer at the handshake (covered by the bufconn half), but the interceptor
+// is the last line of defense: if a cert-less TLS peer ever reaches it,
+// principalIsTrusted / TrustedPrincipalFromContext must report false so
+// principal-metadata from that peer is dropped (FD-4). This drives the production
+// leaf==nil branch directly, without a live handshake.
+func TestSECB16Unit_TLSPeerNoVerifiedCert_PrincipalNotTrusted(t *testing.T) {
+	// Peer over TLS but with NO verified client-cert: TLSInfo present, empty
+	// VerifiedChains (this is exactly what a cert-less / unverified peer looks like).
+	tlsPeer := &peer.Peer{AuthInfo: credentials.TLSInfo{State: tls.ConnectionState{}}}
+	require.Empty(t, tlsPeer.AuthInfo.(credentials.TLSInfo).State.VerifiedChains,
+		"precondition: no verified chains (no verified client-cert)")
+
+	// Incoming principal-metadata as a malicious/unverified peer would send.
+	ctx := peer.NewContext(context.Background(), tlsPeer)
+	ctx = metadata.NewIncomingContext(ctx, metadata.Pairs(
+		grpcsrv.MDKeyPrincipalType, "user",
+		grpcsrv.MDKeyPrincipalID, "usr-mallory",
+		grpcsrv.MDKeyPrincipalDisplay, "mallory@example.com",
+	))
+
+	// Run the real interceptor chain (cert-identity → trust-aware principal),
+	// capturing the downstream ctx state the handler would see.
+	var (
+		gotCertID         string
+		gotVerified       bool
+		gotTrusted        = true
+		gotCarrierPrincID = "<unset>"
+	)
+	final := func(c context.Context, _ any) (any, error) {
+		gotCertID, gotVerified = grpcsrv.CertIdentityFromContext(c)
+		_, gotTrusted = grpcsrv.TrustedPrincipalFromContext(c)
+		// The standard carrier that use-cases consume must NOT be contaminated by
+		// an untrusted principal — it must still fall back to SystemPrincipal.
+		gotCarrierPrincID = operations.PrincipalFromContext(c).ID
+		return nil, nil
+	}
+	chained := chainUnary(
+		grpcsrv.UnaryCertIdentityExtract(),
+		grpcsrv.UnaryTrustedPrincipalExtract(),
+	)
+	_, err := chained(ctx, nil, nil, final)
+	require.NoError(t, err)
+
+	// cert-identity layer: TLS present but unverified ⇒ empty id, not verified.
+	require.Equal(t, "", gotCertID, "no verified cert ⇒ empty cert-identity")
+	require.False(t, gotVerified, "TLS peer with empty VerifiedChains ⇒ NOT mTLS-verified (FD-4)")
+
+	// trust layer: principal-metadata from an unverified mTLS peer MUST be dropped.
+	require.False(t, gotTrusted,
+		"principal from unverified TLS peer must NOT be trusted (SEC-B-16 defense-in-depth)")
+	// The untrusted principal must never reach the carrier use-cases read from —
+	// it stays the system fallback, not the metadata-supplied usr-mallory.
+	require.Equal(t, operations.SystemPrincipal().ID, gotCarrierPrincID,
+		"untrusted principal must not populate operations.PrincipalFromContext (FD-4)")
+	require.NotEqual(t, "usr-mallory", gotCarrierPrincID,
+		"the metadata principal-id must not leak into the use-case principal carrier")
+}
+
+// chainUnary composes unary server interceptors left-to-right around a final
+// handler, mirroring grpc.ChainUnaryInterceptor semantics, so unit tests can
+// exercise the real interceptor chain without a server.
+func chainUnary(interceptors ...grpc.UnaryServerInterceptor) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		chained := handler
+		for i := len(interceptors) - 1; i >= 0; i-- {
+			ic := interceptors[i]
+			next := chained
+			chained = func(c context.Context, r any) (any, error) { return ic(c, r, info, next) }
+		}
+		return chained(ctx, req)
+	}
 }

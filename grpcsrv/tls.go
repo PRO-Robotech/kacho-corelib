@@ -29,26 +29,38 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// TLSServer is the per-instance (per-edge, FD-3) server-side TLS config. It is a
-// plain value struct with no process-wide TLS singleton: every grpcsrv.NewServer
+// TLSServer is a HORIZONTAL, per-edge (FD-3) server-side TLS value-struct. It is
+// a plain value struct with no process-wide TLS singleton: every grpcsrv.NewServer
 // receives its own TLSServerCreds argument (architecture.md: no global singletons
 // outside cmd/).
 //
-// Field names / env-tags are part of the SEC-B contract (acceptance SEC-B-01).
-// The env-tags are full names following the Kachō naming-convention
-// (KACHO_<DOMAIN>_<...>); a service embeds this struct under a config field and
-// config.Load (envconfig with empty prefix) resolves these via the explicit-tag
-// fallback. Distinct edges in one process use distinct env-prefixed config blocks
-// (FD-3): one process may run a TLS server and an insecure client simultaneously.
+// It carries NO absolute envconfig tags ON PURPOSE (FD-3, SEC-B-01). This struct
+// is embedded by every service under its own per-edge config field; an absolute
+// tag (e.g. KACHO_VPC_TLS_SERVER_ENABLE) would collapse every embedding onto the
+// same env names and break per-edge independence. Instead the env name is derived
+// from the hierarchy of field names: the SERVICE owns the edge name by choosing
+// the parent field and loading with config.LoadPrefixed("KACHO_<DOMAIN>", &cfg).
+//
+// Example — a service with a public and an admin server-edge:
+//
+//	type Config struct {
+//		Public grpcsrv.TLSServer // → KACHO_VPC_PUBLIC_ENABLE, ..._CERTFILE, ...
+//		Admin  grpcsrv.TLSServer // → KACHO_VPC_ADMIN_ENABLE,  ..._CERTFILE, ...
+//	}
+//	_ = config.LoadPrefixed("KACHO_VPC", &cfg) // each edge resolves independently
+//
+// This yields the KACHO_<DOMAIN>_<EDGE>_<NAME> convention with true per-edge
+// prefixing: distinct edges in one process resolve to distinct env blocks (one
+// process may run a TLS server and an insecure client simultaneously).
 type TLSServer struct {
 	// Enable toggles mTLS for this server. Zero-value false ⇒ insecure (FD-1).
-	Enable bool `envconfig:"KACHO_VPC_TLS_SERVER_ENABLE"`
+	Enable bool
 	// CertFile is the PEM server-certificate presented to clients.
-	CertFile string `envconfig:"KACHO_VPC_TLS_SERVER_CERT_FILE"`
+	CertFile string
 	// KeyFile is the PEM private key for CertFile.
-	KeyFile string `envconfig:"KACHO_VPC_TLS_SERVER_KEY_FILE"`
+	KeyFile string
 	// ClientCAFiles are PEM CA bundles used to verify presented client-certs.
-	ClientCAFiles []string `envconfig:"KACHO_VPC_TLS_SERVER_CLIENT_CA_FILES"`
+	ClientCAFiles []string
 }
 
 // TLSServerCreds returns the grpc.ServerOption carrying the transport credentials

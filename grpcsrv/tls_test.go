@@ -15,7 +15,12 @@ import (
 	"github.com/PRO-Robotech/kacho-corelib/grpcsrv"
 )
 
-// --- SEC-B-01: TLSServer exists with the contract fields, loadable via config.
+// SEC-B-01: TLSServer exists with the contract fields, and is a HORIZONTAL
+// value-struct WITHOUT absolute envconfig tags (FD-3). A service composes it
+// under its own per-edge field, and the parent field name supplies the env
+// prefix segment — so the same struct embedded under two different parent fields
+// resolves to two independent, per-edge-prefixed sets of env vars following the
+// KACHO_<DOMAIN>_<EDGE>_<NAME> convention.
 func TestSECB01_TLSServer_Fields_AndConfigLoad(t *testing.T) {
 	// field/type contract — compile-time assertion via struct literal.
 	cfg := grpcsrv.TLSServer{
@@ -29,21 +34,40 @@ func TestSECB01_TLSServer_Fields_AndConfigLoad(t *testing.T) {
 	require.Equal(t, "/c.key", cfg.KeyFile)
 	require.Equal(t, []string{"/ca.crt"}, cfg.ClientCAFiles)
 
-	// loadable by the existing config mechanism (envconfig) with KACHO_<DOMAIN>_* tags.
+	// True per-edge prefixing: the service owns the env name by choosing the
+	// parent field + an empty-prefix config.Load. Two server-edges in one process
+	// (e.g. a public listener and an admin listener) MUST be independent — that is
+	// the FD-3 invariant the absolute tag broke (it collapsed every embedding onto
+	// the same KACHO_VPC_TLS_SERVER_* names).
 	type svcConfig struct {
-		TLS grpcsrv.TLSServer
+		Public grpcsrv.TLSServer
+		Admin  grpcsrv.TLSServer
 	}
-	t.Setenv("KACHO_VPC_TLS_SERVER_ENABLE", "true")
-	t.Setenv("KACHO_VPC_TLS_SERVER_CERT_FILE", "/srv.crt")
-	t.Setenv("KACHO_VPC_TLS_SERVER_KEY_FILE", "/srv.key")
-	t.Setenv("KACHO_VPC_TLS_SERVER_CLIENT_CA_FILES", "/ca1.crt,/ca2.crt")
+	// Distinct env-prefixed blocks per edge; KACHO_<DOMAIN>_<EDGE>_<NAME>.
+	t.Setenv("KACHO_VPC_PUBLIC_ENABLE", "true")
+	t.Setenv("KACHO_VPC_PUBLIC_CERTFILE", "/public.crt")
+	t.Setenv("KACHO_VPC_PUBLIC_KEYFILE", "/public.key")
+	t.Setenv("KACHO_VPC_PUBLIC_CLIENTCAFILES", "/pub-ca1.crt,/pub-ca2.crt")
+	t.Setenv("KACHO_VPC_ADMIN_ENABLE", "false")
+	t.Setenv("KACHO_VPC_ADMIN_CERTFILE", "/admin.crt")
+	t.Setenv("KACHO_VPC_ADMIN_KEYFILE", "/admin.key")
+	t.Setenv("KACHO_VPC_ADMIN_CLIENTCAFILES", "/adm-ca.crt")
 
 	var c svcConfig
-	require.NoError(t, config.Load(&c))
-	require.True(t, c.TLS.Enable)
-	require.Equal(t, "/srv.crt", c.TLS.CertFile)
-	require.Equal(t, "/srv.key", c.TLS.KeyFile)
-	require.Equal(t, []string{"/ca1.crt", "/ca2.crt"}, c.TLS.ClientCAFiles)
+	require.NoError(t, config.LoadPrefixed("KACHO_VPC", &c))
+
+	// Public edge resolved from its own prefix.
+	require.True(t, c.Public.Enable)
+	require.Equal(t, "/public.crt", c.Public.CertFile)
+	require.Equal(t, "/public.key", c.Public.KeyFile)
+	require.Equal(t, []string{"/pub-ca1.crt", "/pub-ca2.crt"}, c.Public.ClientCAFiles)
+
+	// Admin edge resolved INDEPENDENTLY — proves per-edge prefixing, not a shared
+	// absolute env name (the original FD-3 defect).
+	require.False(t, c.Admin.Enable)
+	require.Equal(t, "/admin.crt", c.Admin.CertFile)
+	require.Equal(t, "/admin.key", c.Admin.KeyFile)
+	require.Equal(t, []string{"/adm-ca.crt"}, c.Admin.ClientCAFiles)
 }
 
 // --- SEC-B-02/18: TLSServer.enable=false ⇒ insecure server-option, no error,

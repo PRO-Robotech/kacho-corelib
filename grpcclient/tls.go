@@ -31,28 +31,41 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// TLSClient is the per-instance (per-edge, FD-3) client-side TLS config. It is a
-// plain value struct with no process-wide TLS singleton: every dial-site receives
-// its own TLSClientCreds argument (architecture.md: no global singletons outside
-// cmd/).
+// TLSClient is a HORIZONTAL, per-edge (FD-3) client-side TLS value-struct. It is
+// a plain value struct with no process-wide TLS singleton: every dial-site
+// receives its own TLSClientCreds argument (architecture.md: no global singletons
+// outside cmd/).
 //
-// Field names / env-tags are part of the SEC-B contract (acceptance SEC-B-01).
-// The env-tags are full names following the Kachō naming-convention
-// (KACHO_<DOMAIN>_<...>); a service embeds this struct under a config field and
-// config.Load (envconfig with empty prefix) resolves these via the explicit-tag
-// fallback. Distinct dial-edges in one process use distinct env-prefixed config
-// blocks (FD-3): one process may run an mTLS client and an insecure server.
+// It carries NO absolute envconfig tags ON PURPOSE (FD-3, SEC-B-01). This struct
+// is embedded by every service under its own per-edge (per-peer) dial config
+// field; an absolute tag (e.g. KACHO_COMPUTE_TLS_CLIENT_ENABLE) would collapse
+// every dial-edge onto the same env names and break per-edge independence.
+// Instead the env name is derived from the hierarchy of field names: the SERVICE
+// owns the edge name by choosing the parent field and loading with
+// config.LoadPrefixed("KACHO_<DOMAIN>", &cfg).
+//
+// Example — a service that dials two peers:
+//
+//	type Config struct {
+//		IAM grpcclient.TLSClient // → KACHO_COMPUTE_IAM_ENABLE, ..._CAFILES, ...
+//		VPC grpcclient.TLSClient // → KACHO_COMPUTE_VPC_ENABLE, ..._CAFILES, ...
+//	}
+//	_ = config.LoadPrefixed("KACHO_COMPUTE", &cfg) // each dial-edge independent
+//
+// This yields the KACHO_<DOMAIN>_<EDGE>_<NAME> convention with true per-edge
+// prefixing: distinct dial-edges in one process resolve to distinct env blocks
+// (one process may run an mTLS client and an insecure server simultaneously).
 type TLSClient struct {
 	// Enable toggles mTLS for this dial. Zero-value false ⇒ insecure (FD-1).
-	Enable bool `envconfig:"KACHO_COMPUTE_TLS_CLIENT_ENABLE"`
+	Enable bool
 	// CertFile is the PEM client-certificate presented to the server.
-	CertFile string `envconfig:"KACHO_COMPUTE_TLS_CLIENT_CERT_FILE"`
+	CertFile string
 	// KeyFile is the PEM private key for CertFile.
-	KeyFile string `envconfig:"KACHO_COMPUTE_TLS_CLIENT_KEY_FILE"`
+	KeyFile string
 	// CAFiles are PEM CA bundles used to verify the server-cert.
-	CAFiles []string `envconfig:"KACHO_COMPUTE_TLS_CLIENT_CA_FILES"`
+	CAFiles []string
 	// ServerName is checked against the server-cert SAN (FD-2).
-	ServerName string `envconfig:"KACHO_COMPUTE_TLS_CLIENT_SERVER_NAME"`
+	ServerName string
 }
 
 // TLSClientCreds returns the grpc.DialOption carrying the transport credentials

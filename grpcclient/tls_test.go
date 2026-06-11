@@ -71,7 +71,12 @@ func issueClientLeaf(t *testing.T, caCert *x509.Certificate, caKey *ecdsa.Privat
 	return certPath, keyPath
 }
 
-// --- SEC-B-01: TLSClient exists with the contract fields, loadable via config.
+// SEC-B-01: TLSClient exists with the contract fields, and is a HORIZONTAL
+// value-struct WITHOUT absolute envconfig tags (FD-3). A service composes it under
+// its own per-edge field; the parent field name supplies the env prefix segment.
+// Two distinct dial-edges in one process (e.g. compute→iam and compute→vpc) MUST
+// resolve to two INDEPENDENT, per-edge-prefixed env sets — true per-edge
+// prefixing, not a single shared absolute env name.
 func TestSECB01_TLSClient_Fields_AndConfigLoad(t *testing.T) {
 	cfg := grpcclient.TLSClient{
 		Enable:     true,
@@ -86,22 +91,40 @@ func TestSECB01_TLSClient_Fields_AndConfigLoad(t *testing.T) {
 	require.Equal(t, []string{"/ca.crt"}, cfg.CAFiles)
 	require.Equal(t, "peer.kacho.svc", cfg.ServerName)
 
+	// Two dial-edges under one service, each its own parent field. The original
+	// FD-3 defect (absolute KACHO_COMPUTE_TLS_CLIENT_* tag) would have collapsed
+	// both edges onto the same env names; per-edge prefixing keeps them distinct.
 	type svcConfig struct {
-		TLS grpcclient.TLSClient
+		IAM     grpcclient.TLSClient
+		VPCPeer grpcclient.TLSClient
 	}
-	t.Setenv("KACHO_COMPUTE_TLS_CLIENT_ENABLE", "true")
-	t.Setenv("KACHO_COMPUTE_TLS_CLIENT_CERT_FILE", "/cli.crt")
-	t.Setenv("KACHO_COMPUTE_TLS_CLIENT_KEY_FILE", "/cli.key")
-	t.Setenv("KACHO_COMPUTE_TLS_CLIENT_CA_FILES", "/ca1.crt,/ca2.crt")
-	t.Setenv("KACHO_COMPUTE_TLS_CLIENT_SERVER_NAME", "iam.kacho.svc")
+	t.Setenv("KACHO_COMPUTE_IAM_ENABLE", "true")
+	t.Setenv("KACHO_COMPUTE_IAM_CERTFILE", "/iam-cli.crt")
+	t.Setenv("KACHO_COMPUTE_IAM_KEYFILE", "/iam-cli.key")
+	t.Setenv("KACHO_COMPUTE_IAM_CAFILES", "/iam-ca1.crt,/iam-ca2.crt")
+	t.Setenv("KACHO_COMPUTE_IAM_SERVERNAME", "iam.kacho.svc")
+	t.Setenv("KACHO_COMPUTE_VPCPEER_ENABLE", "false")
+	t.Setenv("KACHO_COMPUTE_VPCPEER_CERTFILE", "/vpc-cli.crt")
+	t.Setenv("KACHO_COMPUTE_VPCPEER_KEYFILE", "/vpc-cli.key")
+	t.Setenv("KACHO_COMPUTE_VPCPEER_CAFILES", "/vpc-ca.crt")
+	t.Setenv("KACHO_COMPUTE_VPCPEER_SERVERNAME", "vpc.kacho.svc")
 
 	var c svcConfig
-	require.NoError(t, config.Load(&c))
-	require.True(t, c.TLS.Enable)
-	require.Equal(t, "/cli.crt", c.TLS.CertFile)
-	require.Equal(t, "/cli.key", c.TLS.KeyFile)
-	require.Equal(t, []string{"/ca1.crt", "/ca2.crt"}, c.TLS.CAFiles)
-	require.Equal(t, "iam.kacho.svc", c.TLS.ServerName)
+	require.NoError(t, config.LoadPrefixed("KACHO_COMPUTE", &c))
+
+	// IAM dial-edge resolved from its own prefix.
+	require.True(t, c.IAM.Enable)
+	require.Equal(t, "/iam-cli.crt", c.IAM.CertFile)
+	require.Equal(t, "/iam-cli.key", c.IAM.KeyFile)
+	require.Equal(t, []string{"/iam-ca1.crt", "/iam-ca2.crt"}, c.IAM.CAFiles)
+	require.Equal(t, "iam.kacho.svc", c.IAM.ServerName)
+
+	// VPC dial-edge resolved INDEPENDENTLY — proves per-edge prefixing.
+	require.False(t, c.VPCPeer.Enable)
+	require.Equal(t, "/vpc-cli.crt", c.VPCPeer.CertFile)
+	require.Equal(t, "/vpc-cli.key", c.VPCPeer.KeyFile)
+	require.Equal(t, []string{"/vpc-ca.crt"}, c.VPCPeer.CAFiles)
+	require.Equal(t, "vpc.kacho.svc", c.VPCPeer.ServerName)
 }
 
 // --- SEC-B-03/18: TLSClient.enable=false ⇒ insecure dial-option, no file read.
