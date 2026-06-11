@@ -66,12 +66,28 @@ type principalStream struct {
 func (s *principalStream) Context() context.Context { return s.ctx }
 
 func extractPrincipal(ctx context.Context) context.Context {
+	p, ok := principalFromIncomingMetadata(ctx)
+	if !ok {
+		return ctx
+	}
+	if debugExtract {
+		debugLogger.Info("principal_extract: principal set", "type", p.Type, "id", p.ID)
+	}
+	return operations.WithPrincipal(ctx, p)
+}
+
+// principalFromIncomingMetadata parses the x-kacho-principal-* headers from the
+// incoming metadata into an operations.Principal. ok is false when there is no
+// incoming metadata or the required type/id headers are absent (legacy / direct
+// gRPC calls). Shared by extractPrincipal (UnaryPrincipalExtract) and the SEC-B
+// trust-aware UnaryTrustedPrincipalExtract (cert_identity.go).
+func principalFromIncomingMetadata(ctx context.Context) (operations.Principal, bool) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		if debugExtract {
 			debugLogger.Info("principal_extract: no incoming metadata")
 		}
-		return ctx
+		return operations.Principal{}, false
 	}
 	if debugExtract {
 		// Dump all metadata keys for debugging.
@@ -87,17 +103,13 @@ func extractPrincipal(ctx context.Context) context.Context {
 		if debugExtract {
 			debugLogger.Info("principal_extract: missing principal headers", "type", pType, "id", pID)
 		}
-		return ctx
+		return operations.Principal{}, false
 	}
-	p := operations.Principal{
+	return operations.Principal{
 		Type:        pType,
 		ID:          pID,
 		DisplayName: first(md.Get(MDKeyPrincipalDisplay)),
-	}
-	if debugExtract {
-		debugLogger.Info("principal_extract: principal set", "type", p.Type, "id", p.ID)
-	}
-	return operations.WithPrincipal(ctx, p)
+	}, true
 }
 
 func first(vs []string) string {
