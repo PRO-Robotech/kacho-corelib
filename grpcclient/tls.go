@@ -71,9 +71,22 @@ type TLSClient struct {
 // TLSClientCreds returns the grpc.DialOption carrying the transport credentials
 // for this config. See package doc for the behavior contract.
 func TLSClientCreds(cfg TLSClient) (grpc.DialOption, error) {
+	creds, err := TLSClientTransportCreds(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return grpc.WithTransportCredentials(creds), nil
+}
+
+// TLSClientTransportCreds returns the raw credentials.TransportCredentials for
+// this config — the same building block TLSClientCreds wraps into a DialOption.
+// Callers that dial through a builder taking TransportCredentials (rather than a
+// DialOption) use this directly, keeping a single source of truth for the SEC-B
+// behavior contract (FD-1/FD-2/FD-6).
+func TLSClientTransportCreds(cfg TLSClient) (credentials.TransportCredentials, error) {
 	if !cfg.Enable {
 		// FD-1: insecure dial, cert files NOT read.
-		return grpc.WithTransportCredentials(insecure.NewCredentials()), nil
+		return insecure.NewCredentials(), nil
 	}
 
 	if len(cfg.CAFiles) == 0 {
@@ -107,7 +120,7 @@ func TLSClientCreds(cfg TLSClient) (grpc.DialOption, error) {
 		tlsCfg.Certificates = []tls.Certificate{cert}
 	}
 
-	return grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)), nil
+	return credentials.NewTLS(tlsCfg), nil
 }
 
 // loadCAPool reads PEM CA bundles into an x509.CertPool. An empty/garbage bundle

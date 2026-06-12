@@ -197,3 +197,41 @@ func TestSECB18_ClientCreds_ValidFiles_OK(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, opt)
 }
+
+// --- SEC-M: TLSClientTransportCreds is the raw-credentials building block that
+// TLSClientCreds wraps — single source of truth for the SEC-B behavior contract.
+// Callers dialing through a builder that takes credentials.TransportCredentials
+// (rather than a grpc.DialOption) use it directly (compute→vpc, SEC-M). It must
+// honor the same FD-1 (disabled⇒insecure, no file read) / fail-closed contract.
+func TestSECM_TLSClientTransportCreds(t *testing.T) {
+	t.Run("disabled_insecure_no_file_read", func(t *testing.T) {
+		creds, err := grpcclient.TLSClientTransportCreds(grpcclient.TLSClient{
+			Enable:   false,
+			CertFile: "/nonexistent.crt", KeyFile: "/nonexistent.key",
+			CAFiles: []string{"/nonexistent-ca.crt"}, ServerName: "x",
+		})
+		require.NoError(t, err, "enable=false must not read cert files / must not error")
+		require.NotNil(t, creds)
+	})
+
+	t.Run("valid_files_ok", func(t *testing.T) {
+		caPath, caCert, caKey := issueCA(t)
+		cliCrt, cliKey := issueClientLeaf(t, caCert, caKey)
+		creds, err := grpcclient.TLSClientTransportCreds(grpcclient.TLSClient{
+			Enable: true, CertFile: cliCrt, KeyFile: cliKey,
+			CAFiles: []string{caPath}, ServerName: "peer.kacho.svc",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, creds)
+	})
+
+	t.Run("enabled_empty_server_name_error", func(t *testing.T) {
+		caPath, caCert, caKey := issueCA(t)
+		cliCrt, cliKey := issueClientLeaf(t, caCert, caKey)
+		_, err := grpcclient.TLSClientTransportCreds(grpcclient.TLSClient{
+			Enable: true, CertFile: cliCrt, KeyFile: cliKey,
+			CAFiles: []string{caPath}, ServerName: "",
+		})
+		require.Error(t, err, "enable=true with empty server_name must error (FD-2)")
+	})
+}
