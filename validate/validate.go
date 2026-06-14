@@ -309,13 +309,30 @@ func UpdateMask(field string, mask []string, known map[string]struct{}) error {
 }
 
 // resourceIDPrefixes — известные 3-символьные prefix'ы resource-id'ов Kachō
-// (источник — kacho-corelib/ids). Если появится новый домен с новым prefix —
-// добавить сюда.
+// (источник — kacho-corelib/ids + kacho-iam/internal/domain). Если появится
+// новый домен с новым prefix — добавить сюда.
+//
+// ВАЖНО (gh kacho-api-gateway#73): набор обязан покрывать КАЖДЫЙ живой
+// prefix платформы. Family-agnostic `ResourceID` возвращает InvalidArgument на
+// любой неизвестный 3-символьный prefix, поэтому пропущенный здесь живой prefix
+// превращает ЛЮБОЙ well-formed id этого семейства в 400 на authz-edge
+// api-gateway (вместо роутинга к сервису-владельцу). Регрессионный guard
+// (validate/validate_resourceid_test.go) перечисляет все `ids.Prefix*` +
+// iam `domain.Prefix*` и падает, если какой-то не зарегистрирован тут.
 //
 // VPC (KAC-271, per-ресурс): Network=net, Subnet=sub, Address=adr,
 // RouteTable=rtb, SecurityGroup=sgr, Gateway=gtw, NetworkInterface=nic,
 // AddressPool=apl. Op-root VPC = enp (PrefixOperationVPC, оставлен для
 // маршрутизации Operation.Get и backward-compat существующих enp-операций).
+//
+// IAM (kacho-iam/internal/domain/constants.go): Account=acc, Project=prj,
+// User=usr, ServiceAccount=sva, Group=grp, Role=rol, AccessBinding=acb,
+// Operation(IAM)=iop. (cag/cond/soc/evt из constants_extended.go — формат
+// `<prefix>_<…>` с underscore, не 3-char ids.NewID, и не на публичной
+// REST-поверхности под authz — здесь не нужны.)
+//
+// NLB (kacho-corelib/ids): LoadBalancer=nlb (== PrefixOperationNLB),
+// Listener=lst, TargetGroup=tgr, GlobalLoadBalancer=glb.
 //
 // Legacy/прочие домены: Cloud/Folder=b1g, Organization=bpf (resource-manager
 // упразднён, оставлены для legacy operation-id), Instance/Disk=epd,
@@ -326,6 +343,10 @@ var resourceIDPrefixes = map[string]struct{}{
 	"net": {}, "sub": {}, "adr": {}, "rtb": {}, "sgr": {}, "gtw": {}, "nic": {}, "apl": {},
 	// vpc op-root + legacy общие vpc-префиксы (backward-compat)
 	"enp": {}, "e9b": {},
+	// iam (gh#73): Account/Project/User/ServiceAccount/Group/Role/AccessBinding + Operation
+	"acc": {}, "prj": {}, "usr": {}, "sva": {}, "grp": {}, "rol": {}, "acb": {}, "iop": {},
+	// nlb (gh#73): LoadBalancer/Listener/TargetGroup/GlobalLoadBalancer
+	"nlb": {}, "lst": {}, "tgr": {}, "glb": {},
 	// compute + legacy resource-manager
 	"b1g": {}, "bpf": {}, "epd": {}, "fd8": {},
 }
