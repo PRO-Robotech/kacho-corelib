@@ -32,6 +32,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 
 	"github.com/PRO-Robotech/kacho-corelib/operations"
@@ -200,21 +201,34 @@ type trustedPrincipalCtxKey struct{}
 
 type trustedPrincipal struct {
 	principal operations.Principal
-	trusted   bool
+	// acr — the forwarded JWT `acr` (sub-phase 5.4). Carried ONLY when trusted
+	// (same FD-4 boundary as principal); empty on an untrusted/unverified peer.
+	acr     string
+	trusted bool
 }
 
 func withTrustedPrincipal(ctx context.Context) context.Context {
 	trusted := principalIsTrusted(ctx)
 	p := operations.SystemPrincipal()
+	acr := ""
 	if pp, ok := principalFromIncomingMetadata(ctx); ok {
 		p = pp
+	}
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		acr = first(md.Get(MDKeyTokenACR))
+	}
+	if !trusted {
+		// FD-4: on an unverified mTLS peer the forwarded principal-metadata is
+		// dropped — and so is the acr (anti-spoof; a non-gateway peer cannot
+		// elevate its acr by forging the header). 5.4-06 plumbing half.
+		acr = ""
 	}
 	if trusted {
 		// Make the trusted principal available to the standard operations carrier
 		// so existing use-cases (operations.PrincipalFromContext) see it too.
 		ctx = operations.WithPrincipal(ctx, p)
 	}
-	return context.WithValue(ctx, trustedPrincipalCtxKey{}, trustedPrincipal{principal: p, trusted: trusted})
+	return context.WithValue(ctx, trustedPrincipalCtxKey{}, trustedPrincipal{principal: p, acr: acr, trusted: trusted})
 }
 
 // principalIsTrusted implements the FD-4 decision (see UnaryTrustedPrincipalExtract).
@@ -240,4 +254,35 @@ func TrustedPrincipalFromContext(ctx context.Context) (operations.Principal, boo
 		return v.principal, v.trusted
 	}
 	return operations.SystemPrincipal(), false
+}
+
+// WithTrustedACR stores a forwarded JWT `acr` and the FD-4 trust flag directly in
+// ctx (bypassing the metadata extract). Exposed so the iam acr-floor and tests
+// can assert the floor deterministically without a live mTLS peer — the mirror of
+// WithCertIdentity for the principal/acr layer. Note: this overwrites any existing
+// trusted-principal carrier's acr/trusted with the given values while keeping the
+// principal as previously recorded (or the system fallback).
+func WithTrustedACR(ctx context.Context, acr string, trusted bool) context.Context {
+	tp := trustedPrincipal{principal: operations.SystemPrincipal()}
+	if v, ok := ctx.Value(trustedPrincipalCtxKey{}).(trustedPrincipal); ok {
+		tp = v
+	}
+	tp.acr = acr
+	tp.trusted = trusted
+	return context.WithValue(ctx, trustedPrincipalCtxKey{}, tp)
+}
+
+// TrustedACRFromContext returns the forwarded JWT `acr` and whether it is trusted
+// under the FD-4 invariant (sub-phase 5.4). trusted=false means the acr came from
+// an unverified peer on an mTLS listener (or no acr was carried) and an acr-floor
+// must treat it as absent (rank 0, fail-closed). On the insecure dev listener the
+// acr is accepted as today (back-compat), consistent with the principal.
+func TrustedACRFromContext(ctx context.Context) (acr string, trusted bool) {
+	if ctx == nil {
+		return "", false
+	}
+	if v, ok := ctx.Value(trustedPrincipalCtxKey{}).(trustedPrincipal); ok {
+		return v.acr, v.trusted
+	}
+	return "", false
 }
