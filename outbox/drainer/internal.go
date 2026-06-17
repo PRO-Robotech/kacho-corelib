@@ -2,7 +2,6 @@ package drainer
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -228,21 +227,6 @@ func (d *Drainer[T]) markSuccess(ctx context.Context, tx pgx.Tx, id int64) error
 	return nil
 }
 
-// markFailure сохраняет last_error на row (attempt_count уже инкрементнут на claim).
-// При следующем NOTIFY/poll row будет переклеймлена (если attempt_count < MaxAttempts).
-// Выполняется в переданной транзакции.
-func (d *Drainer[T]) markFailure(ctx context.Context, tx pgx.Tx, id int64, errMsg string) error {
-	q := fmt.Sprintf(
-		`UPDATE %s SET last_error = $1 WHERE id = $2`,
-		d.cfg.Table,
-	)
-	_, err := tx.Exec(ctx, q, truncErr(errMsg), id)
-	if err != nil {
-		return fmt.Errorf("mark failure id=%d: %w", id, err)
-	}
-	return nil
-}
-
 // markPoisoned форсит attempt_count = MaxAttempts (drainer больше не переклеймит)
 // и сохраняет last_error. Используется для permanent-errors (ErrPermanent) и
 // decoder-fail. Выполняется в переданной транзакции.
@@ -254,6 +238,33 @@ func (d *Drainer[T]) markPoisoned(ctx context.Context, tx pgx.Tx, id int64, errM
 	_, err := tx.Exec(ctx, q, truncErr(errMsg), d.cfg.MaxAttempts, id)
 	if err != nil {
 		return fmt.Errorf("mark poisoned id=%d: %w", id, err)
+	}
+	return nil
+}
+
+// markTransientFailure сохраняет last_error И гарантирует, что transient-класс
+// НИКОГДА не отравит строку (sub-phase 1.4 D-5): attempt_count кап'ится ниже
+// MaxAttempts (MaxAttempts-1), поэтому CAS-claim-условие `attempt_count <
+// MaxAttempts` остаётся истинным сколько угодно долго — затяжной IAM-outage
+// (Unavailable/timeout) ретраится unbounded с backoff, intent не теряется.
+// attempt_count при этом продолжает расти до cap'а (питает exp-backoff и
+// остаётся видимым в логах как «число попыток»). Выполняется в переданной tx.
+func (d *Drainer[T]) markTransientFailure(ctx context.Context, tx pgx.Tx, id int64, errMsg string) error {
+	// Cap at MaxAttempts-1 so the poison-gate (attempt_count < MaxAttempts) never
+	// trips for a transient error. LEAST(...) keeps the existing increment for
+	// rows still below the cap (backoff continues to grow), and clamps any row
+	// that the claim pushed up to / past the cap back to MaxAttempts-1.
+	capAttempt := d.cfg.MaxAttempts - 1
+	if capAttempt < 0 {
+		capAttempt = 0
+	}
+	q := fmt.Sprintf(
+		`UPDATE %s SET last_error = $1, attempt_count = LEAST(attempt_count, $2) WHERE id = $3`,
+		d.cfg.Table,
+	)
+	_, err := tx.Exec(ctx, q, truncErr(errMsg), capAttempt, id)
+	if err != nil {
+		return fmt.Errorf("mark transient id=%d: %w", id, err)
 	}
 	return nil
 }
@@ -399,61 +410,66 @@ func (d *Drainer[T]) processRowInTx(parentCtx context.Context, tx pgx.Tx, r clai
 	)
 	defer dbCancel()
 
-	// 1. Decode.
+	// 1. Decode. Decoder-fail = permanent (malformed payload, no retry helps).
 	payload, derr := d.decoder(r.payload)
 	if derr != nil {
-		// Decoder-fail = permanent.
 		d.logger.Warn("decode_failed_poison",
 			slog.Int64("id", r.id),
 			slog.String("err", derr.Error()))
-		if err := d.markPoisoned(dbCtx, tx, r.id, derr.Error()); err != nil {
-			d.logger.Error("mark_poisoned_failed",
-				slog.Int64("id", r.id), slog.String("err", err.Error()))
-		}
+		d.poison(dbCtx, tx, r.id, derr.Error())
 		return false
 	}
 
 	// 2. Apply.
 	aerr := d.applier(applyCtx, r.eventType, payload)
 
-	// 3. Mark по результату.
-	switch {
-	case aerr == nil:
+	// 3. Classify + mark. The classifier (sub-phase 1.4 D-5) is the single
+	//    decision point: transient errors (Unavailable/timeout/conn) NEVER
+	//    poison — they retry unbounded with backoff (markTransientFailure caps
+	//    attempt_count below the poison gate). Only ErrPermanent / gRPC
+	//    InvalidArgument poison; ErrAlreadyApplied is idempotent success.
+	switch Classify(aerr) {
+	case ClassSuccess, ClassAlreadyApplied:
+		if Classify(aerr) == ClassAlreadyApplied {
+			d.logger.Debug("target_already_applied",
+				slog.Int64("id", r.id), slog.String("event_type", r.eventType))
+		}
 		if err := d.markSuccess(dbCtx, tx, r.id); err != nil {
 			d.logger.Error("mark_success_failed",
 				slog.Int64("id", r.id), slog.String("err", err.Error()))
 		}
 		return false
-	case errors.Is(aerr, ErrAlreadyApplied):
-		d.logger.Debug("target_already_applied",
-			slog.Int64("id", r.id), slog.String("event_type", r.eventType))
-		if err := d.markSuccess(dbCtx, tx, r.id); err != nil {
-			d.logger.Error("mark_success_failed",
-				slog.Int64("id", r.id), slog.String("err", err.Error()))
-		}
-		return false
-	case errors.Is(aerr, ErrPermanent):
+	case ClassPermanent:
 		d.logger.Warn("apply_permanent_poison",
 			slog.Int64("id", r.id),
 			slog.String("event_type", r.eventType),
 			slog.String("err", aerr.Error()))
-		if err := d.markPoisoned(dbCtx, tx, r.id, aerr.Error()); err != nil {
-			d.logger.Error("mark_poisoned_failed",
-				slog.Int64("id", r.id), slog.String("err", err.Error()))
-		}
+		d.poison(dbCtx, tx, r.id, aerr.Error())
 		return false
-	default:
-		// Transient — пишем last_error в tx (будет commit'нут вместе с
-		// attempt_count++); следующий NOTIFY/poll переклеймит.
+	default: // ClassTransient — never poison; retry unbounded with backoff.
 		d.logger.Debug("apply_transient_retry",
 			slog.Int64("id", r.id),
 			slog.Int("attempt", r.attemptCount),
 			slog.String("err", aerr.Error()))
-		if err := d.markFailure(dbCtx, tx, r.id, aerr.Error()); err != nil {
-			d.logger.Error("mark_failure_failed",
+		if err := d.markTransientFailure(dbCtx, tx, r.id, aerr.Error()); err != nil {
+			d.logger.Error("mark_transient_failed",
 				slog.Int64("id", r.id), slog.String("err", err.Error()))
 		}
 		return true
+	}
+}
+
+// poison marks the row poisoned (attempt_count = MaxAttempts) and notifies the
+// optional poison observer (metrics: outbox_poisoned_total). Used for permanent
+// applier errors and decoder failures only — never for transient errors (D-5).
+func (d *Drainer[T]) poison(ctx context.Context, tx pgx.Tx, id int64, errMsg string) {
+	if err := d.markPoisoned(ctx, tx, id, errMsg); err != nil {
+		d.logger.Error("mark_poisoned_failed",
+			slog.Int64("id", id), slog.String("err", err.Error()))
+		return
+	}
+	if d.onPoison != nil {
+		d.onPoison()
 	}
 }
 
@@ -472,4 +488,3 @@ func expBackoff(attempt int, base, max time.Duration) time.Duration {
 	}
 	return d
 }
-

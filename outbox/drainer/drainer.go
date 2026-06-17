@@ -97,6 +97,25 @@ type Drainer[T any] struct {
 	decoder Decoder[T]
 	applier Applier[T]
 	logger  *slog.Logger
+
+	// onPoison, if set, is invoked once each time a row is poisoned (permanent
+	// error / decode-fail). Used to drive the outbox_poisoned_total metric
+	// (sub-phase 1.4 D-7) without coupling the drainer to the metrics package.
+	onPoison func()
+}
+
+// Option customises a Drainer at construction (functional-options pattern).
+type Option[T any] func(*Drainer[T])
+
+// WithPoisonObserver registers a callback invoked once per poisoned row. Wire it
+// to a metrics recorder's IncPoisoned to make poison events observable
+// (outbox_poisoned_total, acceptance 1.4-05/1.4-23). nil is ignored.
+func WithPoisonObserver[T any](fn func()) Option[T] {
+	return func(d *Drainer[T]) {
+		if fn != nil {
+			d.onPoison = fn
+		}
+	}
 }
 
 // New создаёт Drainer; не запускает (вызывайте Run).
@@ -114,6 +133,7 @@ func New[T any](
 	decoder Decoder[T],
 	applier Applier[T],
 	logger *slog.Logger,
+	opts ...Option[T],
 ) (*Drainer[T], error) {
 	if pool == nil {
 		return nil, errors.New("drainer.New: pool is nil")
@@ -139,13 +159,17 @@ func New[T any](
 		slog.String("table", cfg.Table),
 		slog.String("channel", cfg.Channel),
 	)
-	return &Drainer[T]{
+	d := &Drainer[T]{
 		cfg:     cfg,
 		pool:    pool,
 		decoder: decoder,
 		applier: applier,
 		logger:  logger,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(d)
+	}
+	return d, nil
 }
 
 // Run — основной loop drainer-а. Блокирует до ctx.Done().

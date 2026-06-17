@@ -796,4 +796,3 @@ func TestW1_1_15_MissedNotify_StartupCatchup(t *testing.T) {
 		waitForRowSent(t, ctx, pool, id, 2*time.Second)
 	}
 }
-
