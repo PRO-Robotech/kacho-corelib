@@ -93,7 +93,7 @@ func sanitizeProtoIdent(s string) string {
 			out = append(out, '_')
 		}
 	}
-	if first := out[0]; !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {
+	if first := out[0]; (first < 'a' || first > 'z') && (first < 'A' || first > 'Z') && first != '_' {
 		out = append([]rune{'M', '_'}, out...)
 	}
 	return string(out)
