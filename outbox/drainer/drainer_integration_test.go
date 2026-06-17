@@ -575,14 +575,18 @@ func TestW1_1_10_TwoDrainerInstances_HAExactlyOnce(t *testing.T) {
 		assert.Equalf(t, 1, count, "payload %s applied %dx (must be exactly once across HA)", payload, count)
 	}
 
-	// Load-spread: both drainers must have done at least 1 apply.
-	// (Not strictly guaranteed if one wins all races, but with NOTIFY broadcast
-	// to both LISTENers and CAS-claim race, ≥1 each is realistic; tighten
-	// later if the impl skews.)
-	t.Logf("load split: drainer1=%d drainer2=%d (sum=%d)",
-		calls1.Load(), calls2.Load(), calls1.Load()+calls2.Load())
-	assert.Greater(t, calls1.Load(), int64(0), "drainer1 must have applied at least one row")
-	assert.Greater(t, calls2.Load(), int64(0), "drainer2 must have applied at least one row")
+	// Load-spread is BEST-EFFORT, not an HA-correctness invariant: with
+	// FOR UPDATE SKIP LOCKED a single faster instance may legitimately claim
+	// every row while the other acts as a hot standby — that is still correct
+	// HA (failover-capable, exactly-once preserved). Asserting each drainer
+	// applied ≥1 row is therefore inherently racy and was an intermittent CI
+	// flake ("0 is not greater than 0"). The real guarantee — exactly-once
+	// across both instances with zero duplicates — is asserted above
+	// (total == n + per-payload count == 1). Here we only OBSERVE the split.
+	c1, c2 := calls1.Load(), calls2.Load()
+	t.Logf("HA load split: drainer1=%d drainer2=%d (sum=%d, n=%d)", c1, c2, c1+c2, n)
+	assert.Equal(t, int64(n), c1+c2,
+		"both drainers together must account for exactly n applies (HA coverage)")
 }
 
 // ── 6.4 Graceful shutdown ───────────────────────────────────────────────────
