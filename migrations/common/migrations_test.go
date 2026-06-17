@@ -19,6 +19,9 @@ var migrationSQL string
 //go:embed 0002_operations_principal.sql
 var migration0002SQL string
 
+//go:embed 0003_operations_account_id.sql
+var migration0003SQL string
+
 // setupPostgres поднимает контейнер Postgres с чистой схемой.
 func setupPostgres(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -302,4 +305,108 @@ func TestMigration_C6_0002BackfillExisting(t *testing.T) {
 	assert.Equal(t, "system", pt)
 	assert.Equal(t, "bootstrap", pid)
 	assert.Equal(t, "System", pdn)
+}
+
+// apply0003Up — Up-секция миграции 0003.
+func apply0003Up(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	upSQL := extractGooseSection(migration0003SQL, "Up")
+	require.NotEmpty(t, upSQL)
+	_, err := pool.Exec(context.Background(), upSQL)
+	require.NoError(t, err)
+}
+
+// apply0003Down — Down-секция миграции 0003.
+func apply0003Down(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	downSQL := extractGooseSection(migration0003SQL, "Down")
+	require.NotEmpty(t, downSQL)
+	_, err := pool.Exec(context.Background(), downSQL)
+	require.NoError(t, err)
+}
+
+// C7: Миграция 0003 добавляет nullable account_id-колонку (additive,
+// без NOT NULL — не bloat'ит существующие строки) и partial cursor-индекс.
+func TestMigration_C7_AccountIDColumn(t *testing.T) {
+	pool := setupPostgres(t)
+	ctx := context.Background()
+
+	applyMigrationUp(t, pool)
+	apply0002Up(t, pool)
+	apply0003Up(t, pool)
+
+	// account_id присутствует и nullable (NOT NULL не навязан — additive).
+	var isNullable string
+	err := pool.QueryRow(ctx, `
+		SELECT is_nullable FROM information_schema.columns
+		WHERE table_name = 'operations' AND column_name = 'account_id'
+	`).Scan(&isNullable)
+	require.NoError(t, err)
+	assert.Equal(t, "YES", isNullable, "account_id должен быть nullable (additive)")
+
+	// partial cursor-индекс существует.
+	var idxCount int
+	err = pool.QueryRow(ctx, `
+		SELECT count(*) FROM pg_indexes
+		WHERE tablename = 'operations' AND indexname = 'operations_account_id_idx'
+	`).Scan(&idxCount)
+	require.NoError(t, err)
+	assert.Equal(t, 1, idxCount, "partial account_id cursor-индекс должен существовать")
+
+	// Индекс — partial (WHERE account_id IS NOT NULL).
+	var idxDef string
+	err = pool.QueryRow(ctx, `
+		SELECT indexdef FROM pg_indexes
+		WHERE tablename = 'operations' AND indexname = 'operations_account_id_idx'
+	`).Scan(&idxDef)
+	require.NoError(t, err)
+	assert.Contains(t, idxDef, "account_id IS NOT NULL",
+		"индекс должен быть partial (WHERE account_id IS NOT NULL)")
+}
+
+// C8: Миграция 0003 additive — существующие строки (0001/0002) переживают ALTER
+// без потери данных, account_id у них NULL (не bloat).
+func TestMigration_C8_0003AdditiveExisting(t *testing.T) {
+	pool := setupPostgres(t)
+	ctx := context.Background()
+
+	applyMigrationUp(t, pool)
+	apply0002Up(t, pool)
+	// «доисторическая» строка до 0003.
+	_, err := pool.Exec(ctx, `
+		INSERT INTO operations (id, description, resource_id)
+		VALUES ('pre-0003-op', 'pre-account-id', 'snt-Q')
+	`)
+	require.NoError(t, err)
+
+	apply0003Up(t, pool)
+
+	var resourceID string
+	var accountID *string
+	err = pool.QueryRow(ctx, `
+		SELECT resource_id, account_id FROM operations WHERE id = 'pre-0003-op'
+	`).Scan(&resourceID, &accountID)
+	require.NoError(t, err)
+	assert.Equal(t, "snt-Q", resourceID, "существующие данные не потеряны")
+	assert.Nil(t, accountID, "account_id у доисторической строки NULL (additive)")
+}
+
+// C9: Миграция 0003 идемпотентна (up → down → up).
+func TestMigration_C9_0003Idempotent(t *testing.T) {
+	pool := setupPostgres(t)
+	ctx := context.Background()
+
+	applyMigrationUp(t, pool)
+	apply0002Up(t, pool)
+	apply0003Up(t, pool)
+	apply0003Down(t, pool)
+	apply0003Up(t, pool)
+
+	var colCount int
+	err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM information_schema.columns
+		WHERE table_name = 'operations' AND column_name = 'account_id'
+	`).Scan(&colCount)
+	require.NoError(t, err)
+	assert.Equal(t, 1, colCount, "account_id снова на месте после повторного up")
 }
