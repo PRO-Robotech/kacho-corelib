@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS operations (
   metadata_type          TEXT,
   metadata_data          BYTEA,
   resource_id            TEXT,
+  account_id             TEXT,
   error_code             INT,
   error_message          TEXT,
   error_details          BYTEA,
@@ -41,6 +42,8 @@ CREATE TABLE IF NOT EXISTS operations (
 CREATE INDEX IF NOT EXISTS operations_resource_idx   ON operations (resource_id);
 CREATE INDEX IF NOT EXISTS operations_done_idx        ON operations (done);
 CREATE INDEX IF NOT EXISTS operations_created_at_idx  ON operations (created_at);
+CREATE INDEX IF NOT EXISTS operations_account_id_idx
+  ON operations (account_id, created_at, id) WHERE account_id IS NOT NULL;
 `
 
 // setupPostgres поднимает контейнер Postgres и применяет schema.

@@ -43,6 +43,7 @@ type Repo interface {
 // ListFilter — параметры фильтрации/пагинации для List.
 type ListFilter struct {
 	ResourceID string // если непуст — фильтр по resource_id (денормализованное поле)
+	AccountID  string // если непуст — фильтр по account_id (денормализованное поле; sub-phase 1.2 §D-5, partial cursor-индекс)
 	PageSize   int64
 	PageToken  string
 }
@@ -125,6 +126,10 @@ func (r *pgRepo) CreateWithPrincipal(ctx context.Context, op Operation, p Princi
 
 	// Извлекаем resource_id из метаданных (денормализованный индекс для фильтрации).
 	resourceID := extractResourceID(op.Metadata)
+	// Извлекаем account_id по ТОЧНОМУ имени поля (sub-phase 1.2 §D-5) — additive
+	// денормализация для account-scoped IAM operation-listing. Метаданные без
+	// account_id (не-IAM / категория II) → "" → SQL NULL (back-compat).
+	accountID := extractAccountID(op.Metadata)
 
 	// Fallback на SystemPrincipal если передан пустой p (defensive).
 	if p == (Principal{}) {
@@ -134,10 +139,10 @@ func (r *pgRepo) CreateWithPrincipal(ctx context.Context, op Operation, p Princi
 	q := fmt.Sprintf(`
 		INSERT INTO %s
 		  (id, description, created_at, created_by, modified_at, done,
-		   metadata_type, metadata_data, resource_id,
+		   metadata_type, metadata_data, resource_id, account_id,
 		   principal_type, principal_id, principal_display_name)
 		VALUES
-		  ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11)`,
+		  ($1, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11, $12)`,
 		r.tableName(),
 	)
 
@@ -155,6 +160,7 @@ func (r *pgRepo) CreateWithPrincipal(ctx context.Context, op Operation, p Princi
 		metaType,
 		metaData,
 		nullableString(resourceID),
+		nullableString(accountID),
 		p.Type,
 		p.ID,
 		p.DisplayName,
@@ -203,6 +209,14 @@ func (r *pgRepo) List(ctx context.Context, filter ListFilter) ([]Operation, stri
 	if filter.ResourceID != "" {
 		conditions = append(conditions, fmt.Sprintf("resource_id = $%d", argIdx))
 		args = append(args, filter.ResourceID)
+		argIdx++
+	}
+
+	if filter.AccountID != "" {
+		// account-scoped IAM operation-listing (sub-phase 1.2 §D-5). Использует
+		// partial cursor-индекс operations_account_id_idx (account_id NOT NULL).
+		conditions = append(conditions, fmt.Sprintf("account_id = $%d", argIdx))
+		args = append(args, filter.AccountID)
 		argIdx++
 	}
 
@@ -486,6 +500,35 @@ func extractResourceID(metadata *anypb.Any) string {
 		}
 	}
 	return ""
+}
+
+// extractAccountID извлекает поле с именем РОВНО account_id из метаданных
+// операции (sub-phase 1.2 §D-5) для денормализации в account_id-колонку.
+//
+// В отличие от extractResourceID (первое поле с суффиксом _id), это чтение
+// СТРОГО по точному имени account_id: иначе suffix-loop вернул бы первое _id
+// (project_id / user_id / service_account_id), а не owning account. account_id —
+// non-first поле в IAM *Metadata-сообщениях категории (I), поэтому
+// extractResourceID и extractAccountID не конфликтуют (resource_id остаётся
+// первым _id-полем). Метаданные без account_id (vpc/compute/nlb/apps и
+// IAM-категория (II)) → "" → SQL NULL (additive/back-compat).
+func extractAccountID(metadata *anypb.Any) string {
+	if metadata == nil {
+		return ""
+	}
+	msg, err := metadata.UnmarshalNew()
+	if err != nil {
+		return ""
+	}
+	fd := msg.ProtoReflect().Descriptor().Fields().ByName("account_id")
+	if fd == nil {
+		return ""
+	}
+	val := msg.ProtoReflect().Get(fd)
+	if !val.IsValid() {
+		return ""
+	}
+	return val.String()
 }
 
 // nullableString возвращает *string или nil если строка пустая.
