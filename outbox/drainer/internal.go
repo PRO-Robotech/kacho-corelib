@@ -170,13 +170,23 @@ func (d *Drainer[T]) claimRows(ctx context.Context, limit int) ([]claimedRow, pg
 		_ = tx.Rollback(rbCtx)
 	}
 
+	// ORDER BY (attempt_count, id): fairness against transient head-of-line
+	// starvation. D-5 caps a persistently-transient-failing row's attempt_count
+	// at MaxAttempts-1 so it stays claimable forever — under a plain `ORDER BY id`
+	// a backlog of such stuck low-id rows would permanently shadow a freshly
+	// enqueued higher-id intent (the small per-claim LIMIT never advances past
+	// them) and the new intent would never be delivered, breaking at-least-once
+	// under a sustained outage (kacho-iam A-07). Ordering by attempt_count first
+	// makes a fresh row (attempt_count=0) sort ahead of capped rows, so new
+	// intents are always claimed promptly. FIFO for the happy path is preserved:
+	// rows with equal attempt_count fall back to id order.
 	q := fmt.Sprintf(`
 		UPDATE %s
 		   SET attempt_count = attempt_count + 1
 		 WHERE id IN (
 		     SELECT id FROM %s
 		      WHERE sent_at IS NULL AND attempt_count < $1
-		      ORDER BY id
+		      ORDER BY attempt_count, id
 		      FOR UPDATE SKIP LOCKED
 		      LIMIT $2
 		 )

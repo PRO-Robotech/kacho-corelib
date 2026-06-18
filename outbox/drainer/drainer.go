@@ -84,7 +84,8 @@ var ErrPermanent = errors.New("drainer: permanent error, no retry")
 //  1. Слушает LISTEN-канал `cfg.Channel` через dedicated pgx.Conn (hijacked
 //     из pool — see OQ-W1.1-6).
 //  2. На старте — catch-up: SELECT pending rows (sent_at IS NULL, attempt_count < MaxAttempts)
-//     ORDER BY id LIMIT BatchSize → applies each.
+//     ORDER BY attempt_count, id LIMIT BatchSize → applies each (attempt_count-first
+//     ordering предотвращает starvation свежего intent транзитно-залипшим backlog'ом).
 //  3. Main loop: wake-up по NOTIFY (payload = row id) ИЛИ tick(PollFallback)
 //     → claim → apply → mark.
 //  4. Exactly-once: pre-claim атомарный UPDATE … RETURNING с CAS (sent_at IS NULL
