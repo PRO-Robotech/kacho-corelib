@@ -1,0 +1,74 @@
+// Copyright (c) PRO-Robotech
+// SPDX-License-Identifier: BUSL-1.1
+
+syntax = "proto3";
+
+// Package kacho.cloud.apigateway.v1 — cluster-internal RPCs of api-gateway.
+// All services in this package are registered ONLY on the api-gateway
+// internal mTLS listener (port 9091) per workspace CLAUDE.md §запрет #6.
+// They are NEVER exposed on the external TLS REST mux.
+package kacho.cloud.apigateway.v1;
+
+import "google/protobuf/empty.proto";
+
+option go_package = "github.com/PRO-Robotech/kacho-corelib/proto/gen/go/kacho/cloud/apigateway/v1;apigatewayv1";
+
+// InternalAuthzCacheService — cluster-internal cache control for api-gateway's
+// authz-decision cache.
+//
+// Caller: kacho-iam `SubjectChangeApplier` (the drainer-applier for
+// `kacho_iam.subject_change_outbox`), invoked once per drained row immediately
+// after the row was claimed (atomically) by the W1.2 push-drainer.
+//
+// Callee: api-gateway, on its internal mTLS gRPC listener (port 9091).
+// Not registered on the external TLS endpoint (workspace CLAUDE.md §запрет #6).
+//
+// Purpose: replace the WS-2.3 poll-loop's whole-cache flush
+// (`AuthzMiddleware.InvalidateCache`) with per-subject invalidation
+// (`decisionCache.InvalidateSubject(subject) int`) — drops only entries
+// scoped to the changed subject. The poll-loop remains as a 30s safety net
+// for the push-path (see W1.2 acceptance §0).
+//
+// Latency promise: ≥ 1 api-gateway replica converges (< 1s) on revoke commit
+// via this RPC. All HA-replicas converge within ≤ 30s via the safety-net
+// poll-loop. (Fanout to all replicas in < 1s is out of scope — see
+// acceptance OQ-W1.2-7.)
+service InternalAuthzCacheService {
+  // InvalidateSubject drops decision-cache entries scoped to the given
+  // subject (FGA prefix). Idempotent: a subject with no cached entries
+  // returns codes.NotFound, which the drainer maps to
+  // drainer.ErrAlreadyApplied so the outbox row is marked sent_at and
+  // never re-tried.
+  //
+  // The response is purposefully empty — subjects-affected count is
+  // reported via metric `apigw.authz.cache.invalidate.entries` (labels:
+  // event_type, subject_type) instead of the RPC reply.
+  rpc InvalidateSubject (InvalidateSubjectRequest)
+    returns (google.protobuf.Empty);
+}
+
+// InvalidateSubjectRequest — sole input of InvalidateSubject.
+message InvalidateSubjectRequest {
+  // Subject — FGA-style "<type>:<id>" identifier. REQUIRED.
+  // Examples: "user:usr_abc123", "service_account:sva_xyz",
+  // "group:grp_team_a".
+  // Empty value → InvalidArgument from server (per acceptance §6.3.3).
+  string subject = 1;
+
+  // ResourceType / ResourceID — optional scope hint. When BOTH set,
+  // a future per-resource implementation would invalidate only entries
+  // matching (subject, resource_type, resource_id).
+  //
+  // MVP (W1.2): gateway ignores these and invalidates ALL entries for
+  // the subject — a safe upper bound (over-invalidates unrelated
+  // resources of the same subject but never under-invalidates). See
+  // acceptance OQ-W1.2-3.
+  string resource_type = 2;
+  string resource_id   = 3;
+
+  // EventType — diagnostic only (logged + emitted as metric label).
+  // Does NOT influence cache-invalidation behaviour.
+  // Canonical values: binding_revoke / binding_grant / jit_revoke /
+  // bg_revoke / group_member_change.
+  string event_type = 4;
+}
