@@ -205,8 +205,8 @@ func TestReconciler_TwoReplicas_SkipLocked_ExactlyOnce(t *testing.T) {
 	rcB := newReconciler(t, pool, res, rec)
 
 	doneCh := make(chan int, 2)
-	go func() { recoverAll(t, ctx, rcA); doneCh <- 0 }()
-	go func() { recoverAll(t, ctx, rcB); doneCh <- 0 }()
+	go func() { _ = recoverAll(t, ctx, rcA); doneCh <- 0 }()
+	go func() { _ = recoverAll(t, ctx, rcB); doneCh <- 0 }()
 	<-doneCh
 	<-doneCh
 

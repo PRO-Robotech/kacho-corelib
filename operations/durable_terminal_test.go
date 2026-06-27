@@ -25,7 +25,7 @@ import (
 )
 
 // flakyRepo — in-memory Repo с инъекцией сбоев в терминальную запись. Только
-// методы, нужные worker'у (MarkDone/MarkError). transientErr — не-sentinel
+// методы, нужные worker'у (MarkDone/MarkError). errTransient — не-sentinel
 // ошибка, которую durable-loop трактует как transient и ретраит.
 type flakyRepo struct {
 	mu sync.Mutex
@@ -44,7 +44,7 @@ type flakyRepo struct {
 	errorAttempts int
 }
 
-var transientErr = errors.New("connection refused: terminal write transient")
+var errTransient = errors.New("connection refused: terminal write transient")
 
 func newFlakyRepo() *flakyRepo {
 	return &flakyRepo{
@@ -70,11 +70,11 @@ func (r *flakyRepo) MarkDone(_ context.Context, id string, resp *anypb.Any) erro
 	defer r.mu.Unlock()
 	r.doneAttempts++
 	if r.alwaysFailDone {
-		return transientErr
+		return errTransient
 	}
 	if r.markDoneFailsLeft > 0 {
 		r.markDoneFailsLeft--
-		return transientErr
+		return errTransient
 	}
 	r.done[id] = resp
 	return nil
@@ -85,11 +85,11 @@ func (r *flakyRepo) MarkError(_ context.Context, id string, st *rpcstatus.Status
 	defer r.mu.Unlock()
 	r.errorAttempts++
 	if r.alwaysFailError {
-		return transientErr
+		return errTransient
 	}
 	if r.markErrorFailsLeft > 0 {
 		r.markErrorFailsLeft--
-		return transientErr
+		return errTransient
 	}
 	r.errored[id] = st
 	return nil
