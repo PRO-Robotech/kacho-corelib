@@ -117,6 +117,10 @@ func (i *Interceptor) Unary() grpc.UnaryServerInterceptor {
 		switch dec {
 		case DecisionAllowed, DecisionNoPath:
 			return handler(ctx, req)
+		case DecisionHideExistence:
+			// Existence-hiding: объект есть, но caller не вправе видеть → NOT_FOUND
+			// (handler НЕ вызывается, чтобы не слить ресурс).
+			return nil, status.Error(codes.NotFound, "not found")
 		case DecisionDenied:
 			return nil, status.Error(codes.PermissionDenied, "permission denied")
 		case DecisionUnavailable:
@@ -162,6 +166,8 @@ func (i *Interceptor) Stream() grpc.StreamServerInterceptor {
 		switch dec {
 		case DecisionAllowed, DecisionInternal, DecisionNoPath:
 			return handler(srv, ss)
+		case DecisionHideExistence:
+			return status.Error(codes.NotFound, "not found")
 		case DecisionDenied:
 			return status.Error(codes.PermissionDenied, "permission denied")
 		case DecisionUnavailable:
@@ -284,6 +290,17 @@ func (i *Interceptor) authorize(ctx context.Context, fullMethod string, req any)
 				slog.String("relation", entry.Relation),
 				slog.String("object", object))
 			return DecisionNoPath, nil
+		}
+		if errors.Is(err, ErrHideExistence) {
+			// Объект существует, но caller не вправе видеть → existence-hiding:
+			// блокируем handler и отдаём NOT_FOUND (не PermissionDenied), чтобы
+			// «есть-но-не-твой» было неотличимо от «нет такого».
+			atomic.AddUint64(&i.deniedTotal, 1)
+			logger.Warn("authz_hide_existence",
+				slog.String("subject", subjectFGA),
+				slog.String("relation", entry.Relation),
+				slog.String("object", object))
+			return DecisionHideExistence, nil
 		}
 		atomic.AddUint64(&i.unavailableTotal, 1)
 		logger.Error("authz_check_unavailable",

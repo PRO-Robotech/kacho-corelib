@@ -144,6 +144,13 @@ const (
 	// вернет NOT_FOUND из DB. Инициируется, когда CheckClient.Check() возвращает
 	// ErrNoPath.
 	DecisionNoPath
+	// DecisionHideExistence — object-scoped deny на СУЩЕСТВУЮЩИЙ ресурс, который
+	// caller не вправе видеть. Interceptor БЛОКИРУЕТ handler (в отличие от
+	// DecisionNoPath) и возвращает NOT_FOUND, скрывая факт существования
+	// (existence-hiding): tenant без доступа не должен отличить «есть-но-не-твой»
+	// от «нет такого». Инициируется, когда CheckClient.Check() возвращает
+	// ErrHideExistence (клиент сам сверил наличие объекта в своей БД).
+	DecisionHideExistence
 )
 
 // String — human-readable representation, используется в метриках / логах.
@@ -163,6 +170,8 @@ func (d Decision) String() string {
 		return "rate_limited"
 	case DecisionNoPath:
 		return "no_path"
+	case DecisionHideExistence:
+		return "hide_existence"
 	}
 	return "unknown"
 }
@@ -195,6 +204,14 @@ var ErrPermissionDenied = errors.New("authz: permission denied")
 // Используется только клиентами, которые имеют доступ к полю `reason`
 // в CheckResponse (kacho-compute, kacho-vpc). Другие клиенты могут игнорировать.
 var ErrNoPath = errors.New("authz: no FGA path to resource")
+
+// ErrHideExistence — CheckClient.Check() sentinel: object-scoped deny на ресурс,
+// который СУЩЕСТВУЕТ в БД сервиса, но caller не вправе его видеть. В отличие от
+// ErrNoPath (passthrough → handler сам отдаст NOT_FOUND для отсутствующего),
+// здесь объект есть — passthrough слил бы его. Interceptor БЛОКИРУЕТ handler и
+// возвращает NOT_FOUND (existence-hiding): «есть-но-не-твой» неотличимо от «нет».
+// Клиент возвращает этот sentinel, только сам сверив наличие объекта в своей БД.
+var ErrHideExistence = errors.New("authz: hide existence (deny on existing object)")
 
 // FormatObject форматирует FGA-object string: "<type>:<id>".
 // Возвращает err если type/id содержат запрещенные символы (':', whitespace).

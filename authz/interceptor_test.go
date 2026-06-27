@@ -109,6 +109,32 @@ func TestInterceptor_DeniedOnNegativeCheck(t *testing.T) {
 	}
 }
 
+func TestInterceptor_HideExistenceMapsToNotFound(t *testing.T) {
+	// Клиент сигналит existence-hiding: объект есть, но caller не вправе видеть.
+	// Interceptor обязан вернуть NOT_FOUND (не PermissionDenied) и НЕ звать handler.
+	handlerCalled := false
+	stub := authz.CheckClientFunc(func(ctx context.Context, s, r, o string) (bool, error) {
+		return false, authz.ErrHideExistence
+	})
+	intr := authz.NewInterceptor(authz.InterceptorOptions{
+		Map:    makeMap(),
+		Client: stub,
+	})
+	ctx := ctxWithPrincipal(t, "usr_bob", "user")
+	_, err := intr.Unary()(ctx, &fakeReq{id: "enp_x"},
+		&grpc.UnaryServerInfo{FullMethod: "/kacho.cloud.vpc.v1.NetworkService/Get"},
+		func(ctx context.Context, req any) (any, error) {
+			handlerCalled = true
+			return &fakeReq{}, nil
+		})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("expected NotFound (existence-hiding), got %v", err)
+	}
+	if handlerCalled {
+		t.Fatalf("handler must NOT be called on existence-hiding (would leak the object)")
+	}
+}
+
 func TestInterceptor_FailClosedOnCheckError(t *testing.T) {
 	stub := authz.CheckClientFunc(func(ctx context.Context, s, r, o string) (bool, error) {
 		return false, errors.New("connection refused")
