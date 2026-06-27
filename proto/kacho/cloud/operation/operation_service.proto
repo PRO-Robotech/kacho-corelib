@@ -1,0 +1,40 @@
+// Copyright (c) PRO-Robotech
+// SPDX-License-Identifier: BUSL-1.1
+
+syntax = "proto3";
+
+package kacho.cloud.operation;
+
+import "google/api/annotations.proto";
+import "kacho/cloud/operation/operation.proto";
+import "kacho/cloud/validation.proto";
+import "kacho/iam/authz/v1/authz_options.proto";
+
+option go_package = "github.com/PRO-Robotech/kacho-corelib/proto/gen/go/kacho/cloud/operation;operationv1";
+
+// A set of methods for managing operations for asynchronous API requests.
+service OperationService {
+  // Returns the specified Operation resource.
+  rpc Get (GetOperationRequest) returns (Operation) {
+    option (google.api.http) = { get: "/operations/{operation_id}" };
+    option (kacho.iam.authz.v1.permission) = "<exempt>";
+  }
+
+  // Cancels the specified operation.
+  //
+  // Note that currently Object Storage API does not support cancelling operations.
+  rpc Cancel (CancelOperationRequest) returns (Operation) {
+    option (google.api.http) = { post: "/operations/{operation_id}:cancel" body: "*" };
+    option (kacho.iam.authz.v1.permission) = "<exempt>";
+  }
+}
+
+message GetOperationRequest {
+  // ID of the Operation resource to return.
+  string operation_id = 1 [(required) = true];
+}
+
+message CancelOperationRequest {
+  // ID of the operation to cancel.
+  string operation_id = 1 [(required) = true];
+}
