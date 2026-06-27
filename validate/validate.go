@@ -347,6 +347,10 @@ var resourceIDPrefixes = map[string]struct{}{
 	"acc": {}, "prj": {}, "usr": {}, "sva": {}, "grp": {}, "rol": {}, "acb": {}, "iop": {},
 	// nlb (gh#73): LoadBalancer/Listener/TargetGroup/GlobalLoadBalancer
 	"nlb": {}, "lst": {}, "tgr": {}, "glb": {},
+	// apps (PaaS): Application=app (resource) + aop (apps op-root). Без них
+	// well-formed app-id отдавал бы InvalidArgument на authz-edge вместо
+	// роутинга к kacho-apps.
+	"app": {}, "aop": {},
 	// compute + legacy resource-manager
 	"b1g": {}, "bpf": {}, "epd": {}, "fd8": {},
 }

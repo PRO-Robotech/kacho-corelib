@@ -80,6 +80,12 @@ const (
 	PrefixTargetGroup        = "tgr"
 	PrefixGlobalLoadBalancer = "glb"
 
+	// apps (PaaS): Application получает свой 3-char resource-prefix `app`;
+	// apps-домен Operation получает отдельный стабильный op-prefix `aop`
+	// (декаплен от ресурса, как enp/epd) — api-gateway opsproxy маршрутизирует
+	// Operation.Get по первым 3 символам.
+	PrefixApplication = "app"
+
 	// Operation prefix per service-domain — отдельный, стабильный per-домен
 	// prefix, по которому gateway opsproxy маршрутизирует Operation.Get.
 	//
@@ -91,6 +97,7 @@ const (
 	PrefixOperationVPC     = "enp"              // vpc op-root (декаплен от PrefixNetwork в KAC-271)
 	PrefixOperationCompute = PrefixInstance     // compute: epd
 	PrefixOperationNLB     = PrefixLoadBalancer // nlb: nlb
+	PrefixOperationApps    = "aop"              // apps op-root (декаплен от PrefixApplication)
 )
 
 // NewID возвращает идентификатор формата "<prefix><17-char crockford-base32>"
