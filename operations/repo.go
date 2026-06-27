@@ -51,6 +51,113 @@ type ListFilter struct {
 // ErrNotFound возвращается из Get, если операция не найдена.
 var ErrNotFound = errors.New("operation not found")
 
+// opColumns — канонический порядок колонок для scanOperation. Используется во
+// всех SELECT/RETURNING, читающих полную строку операции (Get/List/GetOwned/
+// CancelOwned/reconciler-claim) — единый источник истины порядка.
+const opColumns = `id, description, created_at, created_by, modified_at, done,
+	metadata_type, metadata_data,
+	error_code, error_message, error_details,
+	response_type, response_data,
+	principal_type, principal_id, principal_display_name`
+
+// rowQuerier — общий для *pgxpool.Pool и pgx.Tx интерфейс QueryRow, чтобы
+// CAS-хелперы терминальной записи работали и на пуле (worker), и внутри
+// транзакции reconciler'а (под FOR UPDATE-claim'ом).
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// markDoneCAS — идемпотентная терминальная запись success: CAS-on-`done`
+// (UPDATE … WHERE id=$1 AND done=false) + различение already-done vs missing в
+// одном round-trip'е через data-modifying CTE. updated=1 → nil; иначе строка
+// присутствует → ErrAlreadyDone (уже терминальна, не перезаписываем); строки
+// нет → ErrNotFound.
+func markDoneCAS(ctx context.Context, q rowQuerier, table, id string, response *anypb.Any) error {
+	respType, respData, err := marshalAny(response)
+	if err != nil {
+		return fmt.Errorf("repo.MarkDone: marshal response: %w", err)
+	}
+	sql := fmt.Sprintf(`
+		WITH upd AS (
+			UPDATE %s
+			   SET done = true, modified_at = $2, response_type = $3, response_data = $4
+			 WHERE id = $1 AND done = false
+			RETURNING 1
+		)
+		SELECT (SELECT count(*) FROM upd) AS updated,
+		       EXISTS(SELECT 1 FROM %s WHERE id = $1) AS present`,
+		table, table)
+	var updated int
+	var present bool
+	if err := q.QueryRow(ctx, sql, id, time.Now().UTC(), respType, respData).Scan(&updated, &present); err != nil {
+		return fmt.Errorf("repo.MarkDone: %w", err)
+	}
+	if updated == 1 {
+		return nil
+	}
+	if present {
+		return ErrAlreadyDone
+	}
+	return ErrNotFound
+}
+
+// markErrorCAS — симметрия markDoneCAS для терминальной записи ошибки.
+func markErrorCAS(ctx context.Context, q rowQuerier, table, id string, errStatus *status.Status) error {
+	errCode, errMsg, errDetails := marshalStatus(errStatus)
+	sql := fmt.Sprintf(`
+		WITH upd AS (
+			UPDATE %s
+			   SET done = true, modified_at = $2,
+			       error_code = $3, error_message = $4, error_details = $5
+			 WHERE id = $1 AND done = false
+			RETURNING 1
+		)
+		SELECT (SELECT count(*) FROM upd) AS updated,
+		       EXISTS(SELECT 1 FROM %s WHERE id = $1) AS present`,
+		table, table)
+	var updated int
+	var present bool
+	if err := q.QueryRow(ctx, sql, id, time.Now().UTC(), errCode, errMsg, errDetails).Scan(&updated, &present); err != nil {
+		return fmt.Errorf("repo.MarkError: %w", err)
+	}
+	if updated == 1 {
+		return nil
+	}
+	if present {
+		return ErrAlreadyDone
+	}
+	return ErrNotFound
+}
+
+// marshalStatus раскладывает google.rpc.Status в (error_code, error_message,
+// error_details) для хранения в колонках. details сериализуются как
+// proto.Marshal(Status) (восстанавливаются в scanOperation).
+func marshalStatus(errStatus *status.Status) (*int32, *string, []byte) {
+	if errStatus == nil {
+		return nil, nil, nil
+	}
+	code := errStatus.GetCode()
+	msg := errStatus.GetMessage()
+	var details []byte
+	if len(errStatus.GetDetails()) > 0 {
+		if b, marshalErr := proto.Marshal(errStatus); marshalErr == nil {
+			details = b
+		}
+	}
+	return &code, &msg, details
+}
+
+// ownerPredicateSQL — ownership-предикат для GetOwned/CancelOwned: match по паре
+// (principal_type, principal_id) ЛИБО по account_id там, где он NOT NULL и
+// owner.AccountID непуст (IAM-ветка; для vpc/compute/nlb AccountID="" → инертна).
+func ownerPredicateSQL(ptIdx, pidIdx, aidIdx int) string {
+	return fmt.Sprintf(
+		"((principal_type = $%d AND principal_id = $%d) OR ($%d <> '' AND account_id IS NOT NULL AND account_id = $%d))",
+		ptIdx, pidIdx, aidIdx, aidIdx)
+}
+
+var _ OwnedOperationRepo = (*pgRepo)(nil)
+
 // pgRepo — реализация Repo поверх pgxpool.
 type pgRepo struct {
 	pool   *pgxpool.Pool
@@ -173,16 +280,7 @@ func (r *pgRepo) CreateWithPrincipal(ctx context.Context, op Operation, p Princi
 
 // Get возвращает операцию по id.
 func (r *pgRepo) Get(ctx context.Context, id string) (*Operation, error) {
-	q := fmt.Sprintf(`
-		SELECT id, description, created_at, created_by, modified_at, done,
-		       metadata_type, metadata_data,
-		       error_code, error_message, error_details,
-		       response_type, response_data,
-		       principal_type, principal_id, principal_display_name
-		FROM %s
-		WHERE id = $1`,
-		r.tableName(),
-	)
+	q := fmt.Sprintf(`SELECT %s FROM %s WHERE id = $1`, opColumns, r.tableName())
 
 	row := r.pool.QueryRow(ctx, q, id)
 	op, err := scanOperation(row)
@@ -239,16 +337,12 @@ func (r *pgRepo) List(ctx context.Context, filter ListFilter) ([]Operation, stri
 	}
 
 	q := fmt.Sprintf(`
-		SELECT id, description, created_at, created_by, modified_at, done,
-		       metadata_type, metadata_data,
-		       error_code, error_message, error_details,
-		       response_type, response_data,
-		       principal_type, principal_id, principal_display_name
+		SELECT %s
 		FROM %s
 		%s
 		ORDER BY created_at ASC, id ASC
 		LIMIT $%d`,
-		r.tableName(), where, argIdx,
+		opColumns, r.tableName(), where, argIdx,
 	)
 	args = append(args, pageSize+1) // запрашиваем на 1 больше для определения наличия следующей страницы
 
@@ -280,85 +374,36 @@ func (r *pgRepo) List(ctx context.Context, filter ListFilter) ([]Operation, stri
 	return ops, nextToken, nil
 }
 
-// MarkDone переводит операцию в done=true с финальным ресурсом.
+// MarkDone переводит операцию в done=true с финальным ресурсом. Идемпотентна и
+// durable: CAS-on-`done` не перезатирает уже-терминальную строку (см. markDoneCAS).
 func (r *pgRepo) MarkDone(ctx context.Context, id string, response *anypb.Any) error {
-	respType, respData, err := marshalAny(response)
-	if err != nil {
-		return fmt.Errorf("repo.MarkDone: marshal response: %w", err)
-	}
-
-	q := fmt.Sprintf(`
-		UPDATE %s
-		SET done = true, modified_at = $2, response_type = $3, response_data = $4
-		WHERE id = $1`,
-		r.tableName(),
-	)
-	tag, err := r.pool.Exec(ctx, q, id, time.Now().UTC(), respType, respData)
-	if err != nil {
-		return fmt.Errorf("repo.MarkDone: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return markDoneCAS(ctx, r.pool, r.tableName(), id, response)
 }
 
-// MarkError переводит операцию в done=true с ошибкой.
+// MarkError переводит операцию в done=true с ошибкой. Симметрично MarkDone:
+// CAS-on-`done`, no-overwrite (markErrorCAS).
 func (r *pgRepo) MarkError(ctx context.Context, id string, errStatus *status.Status) error {
-	var errCode *int32
-	var errMsg *string
-	var errDetails []byte
-
-	if errStatus != nil {
-		code := errStatus.GetCode()
-		msg := errStatus.GetMessage()
-		errCode = &code
-		errMsg = &msg
-
-		if len(errStatus.GetDetails()) > 0 {
-			b, marshalErr := proto.Marshal(errStatus)
-			if marshalErr == nil {
-				errDetails = b
-			}
-		}
-	}
-
-	q := fmt.Sprintf(`
-		UPDATE %s
-		SET done = true, modified_at = $2,
-		    error_code = $3, error_message = $4, error_details = $5
-		WHERE id = $1`,
-		r.tableName(),
-	)
-	tag, err := r.pool.Exec(ctx, q, id, time.Now().UTC(), errCode, errMsg, errDetails)
-	if err != nil {
-		return fmt.Errorf("repo.MarkError: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return markErrorCAS(ctx, r.pool, r.tableName(), id, errStatus)
 }
 
-// ErrAlreadyDone возвращается из Cancel, если операция уже завершена.
+// ErrAlreadyDone возвращается из терминальных переходов, если строка уже
+// завершена (CAS-on-`done` не совпал). Маппится в FAILED_PRECONDITION на
+// Cancel-пути; на worker-пути трактуется как идемпотентный no-op.
 var ErrAlreadyDone = errors.New("operation already completed")
 
 // Cancel переводит операцию в done=true со статусом CANCELLED (gRPC code 1).
-// Если операция уже done — возвращает ErrAlreadyDone (FAILED_PRECONDITION).
-// Если операция не существует — возвращает ErrNotFound.
+// CAS-on-`done`: при 0 строках различает уже-завершённую (ErrAlreadyDone,
+// FAILED_PRECONDITION) и несуществующую (ErrNotFound). Параллельный worker-
+// MarkDone после commit'а Cancel попадает на тот же CAS → 0 строк → no-op,
+// CANCELLED не затирается.
 func (r *pgRepo) Cancel(ctx context.Context, id string) error {
-	cancelledCode := int32(1) // codes.Cancelled
-	cancelledMsg := "operation cancelled"
-
-	// UPDATE only when done=false, чтобы детектировать "already done" по rows-affected.
 	q := fmt.Sprintf(`
 		UPDATE %s
-		SET done = true, modified_at = $2,
-		    error_code = $3, error_message = $4
-		WHERE id = $1 AND done = false`,
+		   SET done = true, modified_at = $2, error_code = 1, error_message = 'operation cancelled'
+		 WHERE id = $1 AND done = false`,
 		r.tableName(),
 	)
-	tag, err := r.pool.Exec(ctx, q, id, time.Now().UTC(), cancelledCode, cancelledMsg)
+	tag, err := r.pool.Exec(ctx, q, id, time.Now().UTC())
 	if err != nil {
 		return fmt.Errorf("repo.Cancel: %w", err)
 	}
@@ -373,8 +418,59 @@ func (r *pgRepo) Cancel(ctx context.Context, id string) error {
 	if op.Done {
 		return ErrAlreadyDone
 	}
-	// race: только что был done=false, но UPDATE не сработал — отдадим ErrNotFound как safe-default.
 	return ErrNotFound
+}
+
+// GetOwned возвращает операцию ТОЛЬКО если она принадлежит owner. Ownership-
+// предикат — внутри SQL WHERE (within-service инвариант на DB-уровне). 0 строк
+// (нет такой ИЛИ не владелец) → ErrNotFound (no-leak, неотличимо).
+func (r *pgRepo) GetOwned(ctx context.Context, id string, owner Owner) (*Operation, error) {
+	q := fmt.Sprintf(`SELECT %s FROM %s WHERE id = $1 AND %s`,
+		opColumns, r.tableName(), ownerPredicateSQL(2, 3, 4))
+	row := r.pool.QueryRow(ctx, q, id, owner.PrincipalType, owner.PrincipalID, owner.AccountID)
+	op, err := scanOperation(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("repo.GetOwned: %w", err)
+	}
+	return op, nil
+}
+
+// CancelOwned — атомарная ownership-scoped отмена. Ownership-предикат и CAS-on-
+// `done` в ОДНОМ UPDATE … WHERE … RETURNING (terminal-state читается тем же
+// стейтментом, reload-Get не нужен; TOCTOU/second-writer-wins исключён).
+// Идемпотентна на уже-CANCELLED (→ OK с тем же Operation); на терминале
+// SUCCESS/ERROR → ErrAlreadyDone; чужая/нет → ErrNotFound.
+func (r *pgRepo) CancelOwned(ctx context.Context, id string, owner Owner) (*Operation, error) {
+	q := fmt.Sprintf(`
+		UPDATE %s
+		   SET done = true, modified_at = $2, error_code = 1, error_message = 'operation cancelled'
+		 WHERE id = $1 AND done = false AND %s
+		RETURNING %s`,
+		r.tableName(), ownerPredicateSQL(3, 4, 5), opColumns)
+	row := r.pool.QueryRow(ctx, q, id, time.Now().UTC(), owner.PrincipalType, owner.PrincipalID, owner.AccountID)
+	op, err := scanOperation(row)
+	if err == nil {
+		return op, nil // отмена применена (CANCELLED)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("repo.CancelOwned: %w", err)
+	}
+	// 0 строк: классифицируем по ownership-scoped чтению (тот же предикат).
+	existing, gErr := r.GetOwned(ctx, id, owner)
+	if gErr != nil {
+		return nil, gErr // ErrNotFound (нет / не владелец) или INTERNAL
+	}
+	if existing.Done {
+		if existing.Error != nil && existing.Error.GetCode() == 1 {
+			return existing, nil // идемпотентно: уже CANCELLED
+		}
+		return nil, ErrAlreadyDone // terminal SUCCESS/ERROR — нельзя отменить
+	}
+	// owned & done=false, но CAS не совпал — редкая гонка; fail-closed.
+	return nil, ErrNotFound
 }
 
 // ---- helpers ----

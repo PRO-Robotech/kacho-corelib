@@ -22,6 +22,9 @@ var migration0002SQL string
 //go:embed 0003_operations_account_id.sql
 var migration0003SQL string
 
+//go:embed 0004_operations_orphan_scan_idx.sql
+var migration0004SQL string
+
 // setupPostgres поднимает контейнер Postgres с чистой схемой.
 func setupPostgres(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -177,6 +180,45 @@ func TestMigration_C2_Indexes(t *testing.T) {
 	`).Scan(&idxCount)
 	require.NoError(t, err)
 	assert.Equal(t, 3, idxCount, "все три индекса должны существовать")
+}
+
+// C-orphan: миграция 0004 добавляет partial-индекс под orphan-scan reconciler'а
+// (durable LRO recovery): индекс (modified_at) WHERE NOT done покрывает
+// claim-запрос reconciler'а и не растёт от завершённых строк.
+func TestMigration_C_OrphanScanIndex(t *testing.T) {
+	pool := setupPostgres(t)
+	ctx := context.Background()
+
+	applyMigrationUp(t, pool) // 0001 — таблица operations
+
+	up0004 := extractGooseSection(migration0004SQL, "Up")
+	require.NotEmpty(t, up0004, "Up-секция 0004 не должна быть пустой")
+	_, err := pool.Exec(ctx, up0004)
+	require.NoError(t, err)
+
+	var idxCount int
+	err = pool.QueryRow(ctx, `
+		SELECT count(*) FROM pg_indexes
+		WHERE tablename = 'operations' AND indexname = 'operations_orphan_scan_idx'
+	`).Scan(&idxCount)
+	require.NoError(t, err)
+	assert.Equal(t, 1, idxCount, "partial-индекс orphan-scan должен существовать")
+
+	// Индекс должен быть partial (predicate WHERE NOT done).
+	var hasPredicate bool
+	err = pool.QueryRow(ctx, `
+		SELECT i.indpred IS NOT NULL
+		FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+		WHERE c.relname = 'operations_orphan_scan_idx'
+	`).Scan(&hasPredicate)
+	require.NoError(t, err)
+	assert.True(t, hasPredicate, "индекс должен быть partial (WHERE NOT done)")
+
+	// Down убирает индекс.
+	down0004 := extractGooseSection(migration0004SQL, "Down")
+	require.NotEmpty(t, down0004, "Down-секция 0004 не должна быть пустой")
+	_, err = pool.Exec(ctx, down0004)
+	require.NoError(t, err)
 }
 
 // C3: Миграция идемпотентна при up/down/up.
