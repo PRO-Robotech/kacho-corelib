@@ -1,0 +1,71 @@
+# Copyright (c) PRO-Robotech
+# SPDX-License-Identifier: BUSL-1.1
+
+# golangci-lint config (v2 schema) — стабильный минимум.
+version: "2"
+
+run:
+  timeout: 3m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - revive
+    - bodyclose
+    - copyloopvar
+
+  settings:
+    revive:
+      rules:
+        - name: var-naming
+          # acronym-fixes (Ip→IP, Smtp→SMTP, Id→ID) ломают proto-mirror naming
+          # в domain/. Поля обязаны совпадать с proto, не trivially переименуешь.
+          # Оставляем правило, но exclusions ниже скрывают domain-/handler-файлы.
+        - name: package-comments
+          disabled: true   # по умолчанию комментарии не пишем
+        - name: exported
+          disabled: true
+        - name: unused-parameter
+          disabled: true
+        - name: unused-receiver
+          disabled: true
+    errcheck:
+      # defer X.Close() — стандартная практика, не баг. Ошибки на close не
+      # actionable (мы уже выходим из функции).
+      exclude-functions:
+        - (*github.com/jackc/pgx/v5/pgxpool.Pool).Close
+        - (*google.golang.org/grpc.ClientConn).Close
+        - (*database/sql.DB).Close
+        - (*os.File).Close
+        - (io.Closer).Close
+
+  exclusions:
+    rules:
+      - path: 'gen/go/'
+        linters: [revive, staticcheck, unused, govet, errcheck]
+      - path: '_test\.go$'
+        linters: [revive, errcheck, unused, staticcheck]
+      # Acronym ревайв-правила vs proto-mirror naming.
+      # Поля типа IpVersion / OutgoingSmtpCapability / DnsOptions и метод
+      # SetDefaultSecurityGroupId — точные копии proto. Service/handler/domain
+      # слои зеркалят это naming, не переименовать без breaking changes
+      # proto-API.
+      - path: 'internal/(domain|handler|service)/'
+        linters: [revive]
+        text: 'var-naming'
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-same-issues: 50
+  max-issues-per-linter: 100
