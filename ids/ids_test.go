@@ -75,7 +75,7 @@ func TestHasKnownPrefix_AcceptsValid(t *testing.T) {
 		PrefixCloud, PrefixFolder, PrefixOrganization,
 		PrefixNetwork, PrefixSubnet, PrefixAddress,
 		PrefixRouteTable, PrefixSecurityGroup, PrefixGateway,
-		PrefixNetworkInterface, PrefixAddressPool,
+		PrefixNetworkInterface, PrefixAddressPool, PrefixAnycastPool,
 		PrefixLoadBalancer, PrefixListener, PrefixTargetGroup,
 		PrefixGlobalLoadBalancer,
 	} {
@@ -131,11 +131,13 @@ func TestVPCResourcePrefixes_DistinctKAC271(t *testing.T) {
 	require.Equal(t, "gtw", PrefixGateway)
 	require.Equal(t, "nic", PrefixNetworkInterface)
 	require.Equal(t, "apl", PrefixAddressPool)
+	require.Equal(t, "aap", PrefixAnycastPool)
 
-	// 8 ресурсных префиксов VPC — попарно различны.
+	// 9 ресурсных префиксов VPC — попарно различны.
 	vpc := []string{
 		PrefixNetwork, PrefixSubnet, PrefixAddress, PrefixRouteTable,
 		PrefixSecurityGroup, PrefixGateway, PrefixNetworkInterface, PrefixAddressPool,
+		PrefixAnycastPool,
 	}
 	seen := map[string]bool{}
 	for _, p := range vpc {

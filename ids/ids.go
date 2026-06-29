@@ -57,6 +57,11 @@ const (
 	PrefixNetworkInterface = "nic"
 	PrefixAddressPool      = "apl"
 
+	// AnycastAddressPool — tenant-facing пул anycast-VIP, привязываемый к Network
+	// (M:N); собственный resource-prefix, чтобы id-парсеры отличали его от обычного
+	// AddressPool (`apl`).
+	PrefixAnycastPool = "aap"
+
 	// compute: Instance/Disk делят `epd`, Image/Snapshot делят `fd8` (зеркалит
 	// VPC-группировку); все compute-операции получают `epd` (== PrefixInstance),
 	// чтобы api-gateway opsproxy мог одним правилом маршрутизировать Operation.Get.
@@ -190,6 +195,7 @@ var knownPrefixes = map[string]struct{}{
 	PrefixGateway:            {}, // gtw
 	PrefixNetworkInterface:   {}, // nic
 	PrefixAddressPool:        {}, // apl
+	PrefixAnycastPool:        {}, // aap
 	PrefixInstance:           {}, // epd (= Disk, OperationCompute)
 	PrefixImage:              {}, // fd8 (= Snapshot)
 	PrefixLoadBalancer:       {}, // nlb (= OperationNLB)
