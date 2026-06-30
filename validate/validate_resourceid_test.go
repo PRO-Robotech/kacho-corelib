@@ -44,6 +44,7 @@ var allIDPrefixes = func() map[string]string {
 		"PrefixGateway":            ids.PrefixGateway,
 		"PrefixNetworkInterface":   ids.PrefixNetworkInterface,
 		"PrefixAddressPool":        ids.PrefixAddressPool,
+		"PrefixAnycastPool":        ids.PrefixAnycastPool,
 		"PrefixInstance":           ids.PrefixInstance,
 		"PrefixDisk":               ids.PrefixDisk,
 		"PrefixImage":              ids.PrefixImage,

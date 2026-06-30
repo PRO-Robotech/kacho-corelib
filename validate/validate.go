@@ -333,7 +333,7 @@ func UpdateMask(field string, mask []string, known map[string]struct{}) error {
 // корректные id переходного периода.
 var resourceIDPrefixes = map[string]struct{}{
 	// vpc (per-ресурс)
-	"net": {}, "sub": {}, "adr": {}, "rtb": {}, "sgr": {}, "gtw": {}, "nic": {}, "apl": {},
+	"net": {}, "sub": {}, "adr": {}, "rtb": {}, "sgr": {}, "gtw": {}, "nic": {}, "apl": {}, "aap": {},
 	// vpc op-root + legacy общие vpc-префиксы (backward-compat)
 	"enp": {}, "e9b": {},
 	// iam: Account/Project/User/ServiceAccount/Group/Role/AccessBinding + Operation
