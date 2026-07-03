@@ -88,6 +88,14 @@ const (
 	// Operation.Get по первым 3 символам.
 	PrefixApplication = "app"
 
+	// registry: Registry (namespace OCI-реестра поверх zot) получает `reg` как
+	// resource-prefix; registry-домен Operation — отдельный стабильный op-prefix
+	// `rop` (декаплен от ресурса), по которому api-gateway opsproxy маршрутизирует
+	// Operation.Get к kacho-registry. Repository/Tag — read-only проекция из zot,
+	// собственного id-prefix не имеют (адресуются именем внутри namespace).
+	PrefixRegistry     = "reg"
+	PrefixOperationReg = "rop"
+
 	// Operation prefix per service-domain — отдельный, стабильный per-домен
 	// prefix, по которому gateway opsproxy маршрутизирует Operation.Get.
 	//

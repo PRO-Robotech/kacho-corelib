@@ -344,6 +344,10 @@ var resourceIDPrefixes = map[string]struct{}{
 	// well-formed app-id отдавал бы InvalidArgument на authz-edge вместо
 	// роутинга к kacho-apps.
 	"app": {}, "aop": {},
+	// registry: Registry=reg (resource) + rop (registry op-root). Без них
+	// well-formed reg-id отдавал бы InvalidArgument на authz-edge вместо
+	// роутинга к kacho-registry.
+	"reg": {}, "rop": {},
 	// compute + legacy resource-manager
 	"b1g": {}, "bpf": {}, "epd": {}, "fd8": {},
 }
