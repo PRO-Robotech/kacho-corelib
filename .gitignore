@@ -4,3 +4,10 @@ coverage.out
 .idea/
 .vscode/
 .DS_Store
+
+# AI-оснастка (источник истины — kacho-workspace, локально синкается) — не коммитим
+.claude/
+CLAUDE.md
+AGENTS.md
+.codex/
+.agents/
