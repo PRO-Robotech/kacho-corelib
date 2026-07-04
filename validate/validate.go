@@ -337,7 +337,9 @@ var resourceIDPrefixes = map[string]struct{}{
 	// vpc op-root + legacy общие vpc-префиксы (backward-compat)
 	"enp": {}, "e9b": {},
 	// iam: Account/Project/User/ServiceAccount/Group/Role/AccessBinding + Operation
-	"acc": {}, "prj": {}, "usr": {}, "sva": {}, "grp": {}, "rol": {}, "acb": {}, "iop": {},
+	// + UserOAuthClient (uoc — персональный access-токен User'а, id `uoc_<…>` в
+	// REST-пути DELETE /iam/v1/users/{userId}/tokens/{tokenId}).
+	"acc": {}, "prj": {}, "usr": {}, "sva": {}, "grp": {}, "rol": {}, "acb": {}, "iop": {}, "uoc": {},
 	// nlb: LoadBalancer/Listener/TargetGroup/GlobalLoadBalancer
 	"nlb": {}, "lst": {}, "tgr": {}, "glb": {},
 	// apps (PaaS): Application=app (resource) + aop (apps op-root). Без них
