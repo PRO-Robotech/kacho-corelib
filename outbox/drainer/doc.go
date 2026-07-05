@@ -91,5 +91,5 @@
 //
 // # См. также
 //
-//   - Writer-side (Emit / WriteEvent): пакет github.com/PRO-Robotech/kacho-corelib/outbox
+//   - Writer-side (Emit): пакет github.com/PRO-Robotech/kacho-corelib/outbox
 package drainer

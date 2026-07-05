@@ -172,3 +172,56 @@ owner-scoped путь (`OwnerFromPrincipal` → `GetOwned`/audit).
 **Эволюция:** при следующем допустимом изменении Go-API `operations` — сделать
 owner-scoped аксессор дефолтным членом `Repo`, а unscoped — явно именованным
 (`GetUnscoped`) для доверенных internal-вызовов (reconciler/worker).
+
+## 8. `operations.Repo` — единый read+write порт, без CQRS Reader/Writer-разделения
+
+**Рубрика:** godzila/evgeniy — CQRS-разделённые порты (Reader / tx-bound Writer).
+
+**Как есть:** `operations/repo.go` держит один `Repo`-интерфейс, смешивающий чтение
+(`Get`/`List`/`GetOwned`/`ListOwned`) и мутации (`Create`/`CreateWithPrincipal`/
+`MarkDone`/`MarkError`/`Cancel`/`CancelOwned`). Единственная реализация — `pgRepo`.
+
+**Почему интерфейс не разбит (contract-safe residual):** разбиение `Repo` на
+`OperationReader` + `OperationWriter` — ломающее изменение Go-API: сигнатуры
+инъекции и все моки `operations.Repo` в сервисных репо (vpc/compute/iam/geo/...)
+перестанут удовлетворять новому набору портов и не скомпилируются. Чисто аддитивное
+добавление узких интерфейсов *поверх* `Repo` (без миграции потребителей) породило бы
+неиспользуемые типы — speculative generality, которую LEAN-проход запрещает
+плодить. Поэтому разделение откладывается до координированной кросс-репо
+Go-API-миграции (тот же шаг, что §7).
+
+**Митигация:** транзакционная граница write-путей выражена на уровне реализации
+(`pgRepo` writer-методы работают в переданной tx через `db.Transactor`), а не
+на уровне порта; корректность atomicity этим не страдает.
+
+## 9. `authz` — два раздельных subject-TTL-кеша (`Cache` и `listObjectsCache`)
+
+**Рубрика:** DRY / corelib reuse — «примитив извлекается один раз».
+
+**Как есть:** пакет `authz` держит два двухуровневых (`subject → map[key]entry`)
+TTL-кеша: `Cache` (cache.go) для positive Check-результатов и `listObjectsCache`
+(listobjects.go) для ListObjects-результатов. Скелет (two-level map, lazy TTL-expiry,
+InvalidateBySubject через O(1) outer-delete, Size, инъектируемый `now`) внешне схож.
+
+**Почему НЕ слиты в generic `subjectTTLCache[V]` (осознанно, не баг):** несмотря на
+внешнее сходство, три аспекта расходятся содержательно, и унификация под общий
+generic либо потеряла бы поведение, либо ослабила бы гарантию:
+
+- **Политика эвикции разная.** `Cache.evictLocked` — expired-first, затем произвольная
+  до low-water (`maxEntries*7/8`); `listObjectsCache.evictIfNeededLocked` — batch-LRU
+  по expiry (10% oldest). Это не случайный дрейф, а разные бюджеты (Check — 100k
+  мелких entry; ListObjects — 10k тяжёлых id-слайсов).
+- **Учёт размера разный** по той же причине (инкрементальный `count` против rescan).
+- **Safety-critical clobber-guard есть только у `Cache`.** `Cache.evictIfStale`
+  удаляет stale-entry под write-lock ТОЛЬКО если `expiresAt.Equal(observed)` —
+  защита от выбрасывания свежего positive-результата, записанного конкурентно между
+  `RUnlock`/`Lock`. Протаскивание этого через generic + eviction-callback усложняет
+  и рискует ослабить именно эту конкурентную гарантию (LEAN-запрет «без ослабления
+  гарантий»).
+
+Выгода DRY (≈по 40 строк скелета) не перевешивает риск для конкурентного пути
+authz-кеша. Дублирование скелета — принятый трейд-офф; поведенческий контракт
+каждого кеша покрыт своими тестами (`cache_test.go`, `listobjects_test.go`).
+
+**Эволюция:** если у кешей сойдутся политика эвикции и модель учёта, извлечь
+`subjectTTLCache[V]` с сохранением clobber-guard в общем `get`-пути.

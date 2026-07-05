@@ -42,6 +42,12 @@ type OwnedOperationRepo interface {
 	// Идемпотентно на уже-CANCELLED (→ OK с тем же Operation); на терминале
 	// SUCCESS/ERROR → ErrAlreadyDone; чужая/нет → ErrNotFound.
 	CancelOwned(ctx context.Context, id string, owner Owner) (*Operation, error)
+	// ListOwned возвращает страницу операций owner'а: ownership-предикат внутри
+	// SQL WHERE (симметрично GetOwned) комбинируется AND-ом с фильтрами
+	// ListFilter (ResourceID/AccountID/keyset-пагинация). Чужие операции не
+	// попадают в выдачу — tenant-facing OperationService.List обязан идти этим
+	// путём, а не unscoped Repo.List. Возвращает (страница, next_page_token, err).
+	ListOwned(ctx context.Context, filter ListFilter, owner Owner) ([]Operation, string, error)
 }
 
 // AsOwned проверяет, что Repo поддерживает ownership-scoped доступ, и возвращает
