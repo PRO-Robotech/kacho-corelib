@@ -73,6 +73,13 @@ type ReconcilerConfig struct {
 	BatchSize int
 	// Interval — период периодического sweep'а (Run). Дефолт 30s.
 	Interval time.Duration
+	// ResolveTimeout — жёсткий потолок времени одного Resolver.Resolve внутри
+	// claim-транзакции. Sweep держит claim-tx (FOR UPDATE SKIP LOCKED + пул-коннект)
+	// открытой на всё время резолва пачки; без потолка зависший доменный Resolve
+	// (напр. peer-вызов без deadline) оставил бы tx idle-in-transaction на
+	// неограниченное время — блокируя VACUUM и удерживая коннект. Потолок гарантирует
+	// прогресс sweep'а. Дефолт 10s; ≤0 → default.
+	ResolveTimeout time.Duration
 }
 
 func (c ReconcilerConfig) withDefaults() ReconcilerConfig {
@@ -84,6 +91,9 @@ func (c ReconcilerConfig) withDefaults() ReconcilerConfig {
 	}
 	if c.Interval <= 0 {
 		c.Interval = 30 * time.Second
+	}
+	if c.ResolveTimeout <= 0 {
+		c.ResolveTimeout = 10 * time.Second
 	}
 	return c
 }
@@ -119,10 +129,11 @@ type Reconciler struct {
 	resolver Resolver
 	rec      Recorder
 	log      *slog.Logger
-	table    string
-	grace    time.Duration
-	batch    int
-	interval time.Duration
+	table          string
+	grace          time.Duration
+	batch          int
+	interval       time.Duration
+	resolveTimeout time.Duration
 }
 
 // NewReconciler конструирует Reconciler. pool/resolver обязательны.
@@ -133,10 +144,11 @@ func NewReconciler(pool *pgxpool.Pool, resolver Resolver, cfg ReconcilerConfig, 
 		resolver: resolver,
 		rec:      NopRecorder{},
 		log:      slog.Default(),
-		table:    pgx.Identifier{cfg.Schema, "operations"}.Sanitize(),
-		grace:    cfg.OrphanGrace,
-		batch:    cfg.BatchSize,
-		interval: cfg.Interval,
+		table:          pgx.Identifier{cfg.Schema, "operations"}.Sanitize(),
+		grace:          cfg.OrphanGrace,
+		batch:          cfg.BatchSize,
+		interval:       cfg.Interval,
+		resolveTimeout: cfg.ResolveTimeout,
 	}
 	for _, o := range opts {
 		o(rc)
@@ -192,7 +204,7 @@ func (rc *Reconciler) Sweep(ctx context.Context) (int, error) {
 	resolved := 0
 	for i := range orphans {
 		op := orphans[i]
-		res, rerr := rc.resolver.Resolve(ctx, op)
+		res, rerr := rc.resolveOne(ctx, op)
 		if rerr != nil {
 			rc.rec.IncReconcileErrors()
 			rc.log.Warn("reconciler: resolver error, skipping orphan", "op", op.ID, "err", rerr)
@@ -226,6 +238,19 @@ func (rc *Reconciler) Sweep(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("operations.Reconciler.Sweep: commit: %w", err)
 	}
 	return resolved, nil
+}
+
+// resolveOne вызывает доменный Resolver под жёстким per-item потолком времени
+// (resolveTimeout). Потолок ограничивает, сколько claim-транзакция может простоять
+// idle-in-transaction на одном резолве (см. ReconcilerConfig.ResolveTimeout).
+// resolveTimeout ≤ 0 → без обёртки (для явного отключения в тестах).
+func (rc *Reconciler) resolveOne(ctx context.Context, op Operation) (ResolverResult, error) {
+	if rc.resolveTimeout <= 0 {
+		return rc.resolver.Resolve(ctx, op)
+	}
+	rctx, cancel := context.WithTimeout(ctx, rc.resolveTimeout)
+	defer cancel()
+	return rc.resolver.Resolve(rctx, op)
 }
 
 // RecoverAll прогоняет Sweep до тех пор, пока очередной прогон не разрешит 0

@@ -254,7 +254,7 @@ func withTrustedPrincipal(ctx context.Context, cfg trustedPrincipalConfig) conte
 	trusted := principalIsTrusted(ctx, cfg)
 	p := operations.SystemPrincipal()
 	acr := ""
-	if pp, ok := principalFromIncomingMetadata(ctx); ok {
+	if pp, ok := principalFromIncomingMetadata(ctx, defaultDebugConfig()); ok {
 		p = pp
 	}
 	if md, ok := metadata.FromIncomingContext(ctx); ok {

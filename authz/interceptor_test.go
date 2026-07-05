@@ -262,6 +262,45 @@ func TestInterceptor_BreakglassAnonymousDenied(t *testing.T) {
 	}
 }
 
+// Breakglass=true эмулирует "все аутентифицированные allowed", НО принципал,
+// которого api-gateway впрыснул как anonymous/bootstrap (injectAnonymous /
+// PrincipalFromContext fallback дают Principal{Type:"system", ID:"anonymous"|
+// "bootstrap"}), обязан быть denied через isAnonymousSubject closed-list. Здесь
+// ctx НЕСЁТ такой Principal (в отличие от TestInterceptor_BreakglassAnonymousDenied,
+// который бьёт по более раннему ok==false branch с context.Background()).
+func TestInterceptor_BreakglassInjectedAnonymousDenied(t *testing.T) {
+	for _, id := range []string{"anonymous", "bootstrap"} {
+		t.Run(id, func(t *testing.T) {
+			stub := authz.CheckClientFunc(func(ctx context.Context, s, r, o string) (bool, error) {
+				t.Fatalf("Check must NOT be called under breakglass")
+				return false, nil
+			})
+			intr := authz.NewInterceptor(authz.InterceptorOptions{
+				Map:        makeMap(),
+				Client:     stub,
+				Breakglass: true,
+			})
+			// Principal{Type:"system", ID:"anonymous"|"bootstrap"} — ровно то, что
+			// продуцирует gateway injectAnonymous / bootstrap fallback.
+			ctx := ctxWithPrincipal(t, id, "system")
+			_, err := runUnary(intr, ctx, "/kacho.cloud.vpc.v1.NetworkService/Get", &fakeReq{id: "enp_x"})
+			if err == nil {
+				t.Fatalf("expected injected %q principal denied even under breakglass", id)
+			}
+			if status.Code(err) != codes.PermissionDenied {
+				t.Fatalf("expected PermissionDenied, got %v", err)
+			}
+			m := intr.Metrics()
+			if m.Breakglass != 0 {
+				t.Fatalf("breakglass metric must NOT increment on %q deny, got %d", id, m.Breakglass)
+			}
+			if m.Denied == 0 {
+				t.Fatalf("expected denied metric incremented for %q, got 0", id)
+			}
+		})
+	}
+}
+
 // AllowSystemPrincipal=true пускает ТОЛЬКО явно установленный system-principal;
 // anonymous (ctx без Principal'а, fallback на SystemPrincipal) обязан быть denied,
 // иначе включение AllowSystemPrincipal на достижимом listener'е открывает обход.

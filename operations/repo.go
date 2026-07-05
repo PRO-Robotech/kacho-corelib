@@ -477,7 +477,7 @@ func scanOperation(row interface {
 	Scan(dest ...any) error
 }) (*Operation, error) {
 	var op Operation
-	var metaType, metaData *[]byte
+	var metaData *[]byte
 	var metaTypeStr *string
 	var errCode *int32
 	var errMsg *string
@@ -507,7 +507,6 @@ func scanOperation(row interface {
 	if err != nil {
 		return nil, err
 	}
-	_ = metaType
 
 	op.Principal = Principal{
 		Type:        principalType,

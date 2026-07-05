@@ -7,9 +7,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
+
+// sanitizeTable квотирует имя таблицы (опц. схема-квалифицированное
+// "schema.table") через pgx.Identifier — идентификатор экранируется библиотекой
+// независимо от дисциплины вызывающего. Даже при контрактe «caller передаёт
+// literal» это defense-in-depth: имя таблицы больше не может стать вектором
+// statement-injection при interpolation в `INSERT INTO %s`.
+func sanitizeTable(table string) string {
+	return pgx.Identifier(strings.Split(table, ".")).Sanitize()
+}
 
 // Emit вставляет одну outbox-строку в произвольную таблицу с фиксированной
 // схемой: (sequence_no BIGSERIAL PK, resource_kind TEXT, resource_id TEXT,
@@ -35,12 +45,13 @@ func Emit(ctx context.Context, tx pgx.Tx, table, kind, id, eventType string, pay
 		// Не должно случаться для разумных payload-ов, но не молчим.
 		return fmt.Errorf("outbox.Emit: marshal payload: %w", err)
 	}
-	// table инжектится в SQL, поэтому caller обязан использовать literal —
-	// проверку whitelist здесь не делаем (helper в общей библиотеке должен
-	// быть гибок). Атаки SQLi через имя таблицы — caller responsibility.
+	// table инжектится в SQL как идентификатор → квотируем через
+	// pgx.Identifier.Sanitize (см. sanitizeTable). Значения по-прежнему идут
+	// параметрами $1..$4. Контракт «caller передаёт literal» остаётся, но
+	// sanitize снимает риск statement-injection через имя таблицы.
 	q := fmt.Sprintf(
 		`INSERT INTO %s (resource_kind, resource_id, event_type, payload) VALUES ($1, $2, $3, $4)`,
-		table,
+		sanitizeTable(table),
 	)
 	_, err = tx.Exec(ctx, q, kind, id, eventType, bp)
 	if err != nil {
