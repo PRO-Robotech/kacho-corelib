@@ -173,18 +173,25 @@ func TestListObjects_InvalidateBySubject(t *testing.T) {
 	}
 }
 
-// TTL expiry → next call re-fetches.
+// TTL expiry → next call re-fetches. Детерминированно: fake-clock вместо
+// time.Sleep (см. listObjectsCache.setNowFunc) — не зависит от wall-clock, не
+// флейкует на нагруженном CI-раннере.
 func TestListObjects_TTLExpiry(t *testing.T) {
 	client := &fakeClient{
 		fn: func(_ context.Context, _ ListObjectsRequest) (ListObjectsResponse, error) {
 			return ListObjectsResponse{ResourceIDs: []string{"net-x"}}, nil
 		},
 	}
+	const ttl = 50 * time.Millisecond
 	svc := NewListObjectsService(client, ListObjectsConfig{
-		TTL:        50 * time.Millisecond,
+		TTL:        ttl,
 		MaxEntries: 100,
 		MaxResults: 10000,
 	})
+
+	base := time.Unix(1_700_000_000, 0)
+	cur := base
+	svc.cache.setNowFunc(func() time.Time { return cur })
 
 	if _, err := svc.ListAllowedIDs(context.Background(), "user:usr_alice", "vpc_network", "vpc.networks.read", ListAllowedIDsOptions{}); err != nil {
 		t.Fatal(err)
@@ -193,8 +200,17 @@ func TestListObjects_TTLExpiry(t *testing.T) {
 		t.Fatalf("after first call: %d", got)
 	}
 
-	time.Sleep(80 * time.Millisecond)
+	// В пределах TTL — cache hit, повторного client-вызова нет.
+	cur = base.Add(ttl - time.Nanosecond)
+	if _, err := svc.ListAllowedIDs(context.Background(), "user:usr_alice", "vpc_network", "vpc.networks.read", ListAllowedIDsOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := client.calls.Load(); got != 1 {
+		t.Fatalf("within TTL: expected cache hit (calls=1), got %d", got)
+	}
 
+	// Перешагнули TTL — запись просрочена, client вызывается снова.
+	cur = base.Add(ttl + time.Nanosecond)
 	if _, err := svc.ListAllowedIDs(context.Background(), "user:usr_alice", "vpc_network", "vpc.networks.read", ListAllowedIDsOptions{}); err != nil {
 		t.Fatal(err)
 	}

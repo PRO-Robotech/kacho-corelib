@@ -48,6 +48,15 @@ type Repo interface {
 	// MarkError переводит операцию в done=true, записывает ошибку (google.rpc.Status).
 	MarkError(ctx context.Context, id string, err *status.Status) error
 	// Cancel переводит операцию в done=true со статусом CANCELLED.
+	//
+	// БЕЗОПАСНОСТЬ (IDOR, CWE-639): Cancel — UNSCOPED, без ownership-предиката
+	// (UPDATE ... WHERE id=$1 AND done=false). id-format публичен и перечислим,
+	// поэтому для tenant-facing OperationService.Cancel НЕЛЬЗЯ вызывать Cancel
+	// напрямую — иначе principal B отменит in-flight операцию principal'а A
+	// (cross-owner LRO corruption). Используйте ownership-scoped
+	// OwnedOperationRepo.CancelOwned (конкретный pgRepo его реализует). Unscoped
+	// Cancel — только для доверенных internal-вызовов (reconciler, worker),
+	// уже авторизованных иначе. Симметрично IDOR-warning на Get выше.
 	Cancel(ctx context.Context, id string) error
 }
 
@@ -301,7 +310,26 @@ func (r *pgRepo) Get(ctx context.Context, id string) (*Operation, error) {
 }
 
 // List возвращает список операций с фильтром и пагинацией по created_at/id курсору.
+//
+// БЕЗОПАСНОСТЬ (IDOR, CWE-639): List — UNSCOPED, фильтрует только по
+// caller-supplied ResourceID/AccountID без enforced ownership-предиката. Для
+// tenant-facing OperationService.List НЕЛЬЗЯ доверять этому пути — используйте
+// ownership-scoped OwnedOperationRepo.ListOwned (predicate внутри SQL WHERE).
+// Unscoped List — только для доверенных internal-вызовов.
 func (r *pgRepo) List(ctx context.Context, filter ListFilter) ([]Operation, string, error) {
+	return r.listWithOwner(ctx, filter, nil)
+}
+
+// ListOwned — ownership-scoped листинг: ownerPredicateSQL AND-ится с фильтрами
+// ListFilter (симметрично GetOwned/CancelOwned). Чужие строки не возвращаются.
+func (r *pgRepo) ListOwned(ctx context.Context, filter ListFilter, owner Owner) ([]Operation, string, error) {
+	return r.listWithOwner(ctx, filter, &owner)
+}
+
+// listWithOwner — общий построитель List/ListOwned. При owner != nil в WHERE
+// добавляется ownerPredicateSQL (ownership-scoped выдача); при owner == nil —
+// unscoped (internal-only, см. IDOR-warning на List).
+func (r *pgRepo) listWithOwner(ctx context.Context, filter ListFilter, owner *Owner) ([]Operation, string, error) {
 	pageSize := filter.PageSize
 	if pageSize <= 0 || pageSize > 1000 {
 		pageSize = 50
@@ -310,6 +338,13 @@ func (r *pgRepo) List(ctx context.Context, filter ListFilter) ([]Operation, stri
 	args := []any{}
 	conditions := []string{}
 	argIdx := 1
+
+	if owner != nil {
+		// Ownership-предикат — первым (симметрично GetOwned), AND с остальными.
+		conditions = append(conditions, ownerPredicateSQL(argIdx, argIdx+1, argIdx+2))
+		args = append(args, owner.PrincipalType, owner.PrincipalID, owner.AccountID)
+		argIdx += 3
+	}
 
 	if filter.ResourceID != "" {
 		conditions = append(conditions, fmt.Sprintf("resource_id = $%d", argIdx))

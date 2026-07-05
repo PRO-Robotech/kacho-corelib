@@ -1,6 +1,10 @@
 // Copyright (c) PRO-Robotech
 // SPDX-License-Identifier: BUSL-1.1
 
+// Package outbox реализует транзакционный outbox-паттерн: каждое мутирующее
+// действие на ресурс пишет строку в per-service outbox-таблицу в ТОЙ ЖЕ
+// транзакции (см. Emit), а trigger pg_notify будит stream subscribers. Единый
+// writer — outbox.Emit; drainer/reconciler читают backlog по sequence_no.
 package outbox
 
 import (

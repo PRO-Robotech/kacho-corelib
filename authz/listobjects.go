@@ -338,6 +338,14 @@ func newListObjectsCache(maxSize int, ttl time.Duration) *listObjectsCache {
 	}
 }
 
+// setNowFunc подменяет источник времени (для детерминированных TTL-тестов),
+// зеркалит Cache.SetNowFunc. Prod-путь использует time.Now (см. newListObjectsCache).
+func (c *listObjectsCache) setNowFunc(now func() time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = now
+}
+
 // extractSubjectFromKey — first field в "subject|...".
 func extractSubjectFromKey(key string) string {
 	for i := 0; i < len(key); i++ {
