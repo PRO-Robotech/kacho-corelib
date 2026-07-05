@@ -49,8 +49,11 @@ CREATE INDEX IF NOT EXISTS operations_account_id_idx
   ON operations (account_id, created_at, id) WHERE account_id IS NOT NULL;
 `
 
-// setupPostgres поднимает контейнер Postgres и применяет schema.
-func setupPostgres(t *testing.T) *pgxpool.Pool {
+// startPostgres поднимает контейнер Postgres, применяет schema и возвращает DSN.
+// Разделено из setupPostgres, чтобы тесты, которым нужен пул со специальными
+// RuntimeParams (напр. idle_in_transaction_session_timeout), могли построить
+// собственный pgxpool поверх той же БД.
+func startPostgres(t *testing.T) string {
 	t.Helper()
 	if testing.Short() || os.Getenv("SKIP_INTEGRATION") == "1" {
 		t.Skip("integration tests skipped (SKIP_INTEGRATION=1)")
@@ -70,12 +73,24 @@ func setupPostgres(t *testing.T) *pgxpool.Pool {
 	dsn, err := ctr.ConnectionString(ctx, "sslmode=disable")
 	require.NoError(t, err)
 
-	pool, err := pgxpool.New(ctx, dsn)
+	// Применяем schema через временный пул.
+	schemaPool, err := pgxpool.New(ctx, dsn)
+	require.NoError(t, err)
+	_, err = schemaPool.Exec(ctx, createTable)
+	require.NoError(t, err, "ошибка создания таблицы operations")
+	schemaPool.Close()
+
+	return dsn
+}
+
+// setupPostgres поднимает контейнер Postgres и применяет schema.
+func setupPostgres(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	dsn := startPostgres(t)
+
+	pool, err := pgxpool.New(context.Background(), dsn)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-
-	_, err = pool.Exec(ctx, createTable)
-	require.NoError(t, err, "ошибка создания таблицы operations")
 
 	return pool
 }
@@ -293,8 +308,13 @@ func TestWorker_Success(t *testing.T) {
 		t.Fatal("worker не завершился в течение 3с")
 	}
 
-	// Небольшая пауза для записи в БД
-	time.Sleep(50 * time.Millisecond)
+	// fn закрывает `done` ДО того, как worker.execute выполнит terminalWrite
+	// (MarkDone) в Postgres. Опрашиваем строку до done=true с ограниченным
+	// дедлайном вместо фиксированного Sleep (устраняет флап на нагруженном CI).
+	waitFor(t, 3*time.Second, func() bool {
+		g, gerr := repo.Get(ctx, op.ID)
+		return gerr == nil && g.Done
+	})
 
 	got, err := repo.Get(ctx, op.ID)
 	require.NoError(t, err)
@@ -327,7 +347,12 @@ func TestWorker_Failure(t *testing.T) {
 		t.Fatal("worker не завершился в течение 3с")
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	// Опрашиваем до done=true (terminalWrite → MarkError идёт после close(done)),
+	// а не фиксированный Sleep — устраняет флап на нагруженном CI.
+	waitFor(t, 3*time.Second, func() bool {
+		g, gerr := repo.Get(ctx, op.ID)
+		return gerr == nil && g.Done
+	})
 
 	got, err := repo.Get(ctx, op.ID)
 	require.NoError(t, err)

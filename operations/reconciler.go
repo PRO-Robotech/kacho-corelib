@@ -208,10 +208,12 @@ func (rc *Reconciler) Sweep(ctx context.Context) (int, error) {
 		if rerr != nil {
 			rc.rec.IncReconcileErrors()
 			rc.log.Warn("reconciler: resolver error, skipping orphan", "op", op.ID, "err", rerr)
+			rc.keepClaimAlive(ctx, tx)
 			continue
 		}
 		switch res.Outcome {
 		case OutcomeSkip:
+			rc.keepClaimAlive(ctx, tx)
 			continue
 		case OutcomeDone:
 			if err := markDoneCAS(ctx, tx, rc.table, op.ID, res.Response); err != nil && !errors.Is(err, ErrAlreadyDone) {
@@ -251,6 +253,26 @@ func (rc *Reconciler) resolveOne(ctx context.Context, op Operation) (ResolverRes
 	rctx, cancel := context.WithTimeout(ctx, rc.resolveTimeout)
 	defer cancel()
 	return rc.resolver.Resolve(rctx, op)
+}
+
+// keepClaimAlive исполняет дешёвый no-op statement на claim-транзакции, сбрасывая
+// серверный idle_in_transaction_session_timeout. Ветки OutcomeDone/OutcomeInterrupted
+// сбрасывают idle-таймер неявно через markDoneCAS/markErrorCAS; ветки OutcomeSkip и
+// resolver-error НЕ пишут в claim-коннект, поэтому без этого «касания» серия
+// последовательных skip'ов (каждый сжигает до ResolveTimeout idle на ДРУГОМ
+// коннекте, пока claim-tx простаивает) накопила бы idle сверх серверного потолка →
+// Postgres прибил бы claim-tx (SQLSTATE 25P03) → tx.Commit / следующий markDoneCAS
+// упали бы, и ВЕСЬ батч (включая быстро-разрешимые орфаны дальше по списку)
+// откатился бы — LRO-recovery не прогрессировал бы именно во время peer-outage,
+// ради восстановления которого reconciler и существует (CWE-400). Так непрерывный
+// idle claim-tx ограничен одним ResolveTimeout, а не суммой по батчу.
+//
+// Ошибка keep-alive лишь логируется: если claim-tx уже мертва, реальную причину
+// поднимет последующий markDoneCAS / tx.Commit.
+func (rc *Reconciler) keepClaimAlive(ctx context.Context, tx pgx.Tx) {
+	if _, err := tx.Exec(ctx, "SELECT 1"); err != nil {
+		rc.log.Warn("reconciler: claim-tx keep-alive failed", "err", err)
+	}
 }
 
 // RecoverAll прогоняет Sweep до тех пор, пока очередной прогон не разрешит 0

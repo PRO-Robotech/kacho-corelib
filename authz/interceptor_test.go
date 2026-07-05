@@ -469,6 +469,38 @@ func TestInterceptor_AllowSystemPrincipal(t *testing.T) {
 	}
 }
 
+// AllowSystemPrincipal must gate the blanket allow to the genuine system
+// identity (Principal{Type:"system", ID:"bootstrap"}), never a client-supplied
+// principal-id string. A caller that forges x-kacho-principal-id=bootstrap with
+// any OTHER principal-type (e.g. "user") must NOT skip the per-RPC Check — it
+// must fall through to the normal authorization path. Regression guard for the
+// CWE-863 magic-string bypass (findings3 SEC #1).
+func TestInterceptor_AllowSystemPrincipal_RejectsForgedBootstrapType(t *testing.T) {
+	checkCalled := false
+	stub := authz.CheckClientFunc(func(ctx context.Context, s, r, o string) (bool, error) {
+		checkCalled = true
+		return false, nil // deny — the forged principal has no access
+	})
+	intr := authz.NewInterceptor(authz.InterceptorOptions{
+		Map:                  makeMap(),
+		Client:               stub,
+		AllowSystemPrincipal: true,
+	})
+	// Forged: principal-id == "bootstrap" but type == "user" (a client can set
+	// x-kacho-principal-id/type headers). This is NOT the system identity.
+	ctx := ctxWithPrincipal(t, "bootstrap", "user")
+	_, err := runUnary(intr, ctx, "/kacho.cloud.vpc.v1.NetworkService/Get", &fakeReq{id: "enp_x"})
+	if err == nil {
+		t.Fatalf("expected forged bootstrap (type=user) to be denied, got allow")
+	}
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied, got %v", err)
+	}
+	if !checkCalled {
+		t.Fatalf("expected the forged bootstrap to fall through to the per-RPC Check")
+	}
+}
+
 func TestInterceptor_CheckTimeoutHonored(t *testing.T) {
 	stub := authz.CheckClientFunc(func(ctx context.Context, s, r, o string) (bool, error) {
 		// Сам стаб не зависит от ctx — проверяем, что Interceptor правильно cancel'ит.

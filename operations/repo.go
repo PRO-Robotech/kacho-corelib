@@ -32,6 +32,14 @@ type Repo interface {
 	// PrincipalFromContext(ctx).
 	CreateWithPrincipal(ctx context.Context, op Operation, p Principal) error
 	// Get возвращает операцию по ID. Возвращает ErrNotFound если операции нет.
+	//
+	// БЕЗОПАСНОСТЬ (IDOR, CWE-639): Get — UNSCOPED, без ownership-предиката. Строка
+	// Operation несёт metadata_data/response_data (сериализованный ресурс, resource_id,
+	// account_id). Для tenant-facing OperationService.Get НЕЛЬЗЯ отдавать результат
+	// Get напрямую — id-format публичен и перечислим, иначе tenant A прочитает
+	// операцию tenant'а B. Используйте ownership-scoped OwnedOperationRepo.GetOwned
+	// (конкретный pgRepo его реализует). Unscoped Get — только для доверенных
+	// internal-вызовов (reconciler, worker), уже авторизованных иначе.
 	Get(ctx context.Context, id string) (*Operation, error)
 	// List возвращает список операций с постраничной навигацией.
 	List(ctx context.Context, filter ListFilter) ([]Operation, string, error)

@@ -104,3 +104,71 @@ doc-comment повышают шанс корректного монтирова�
 composition-root'ов сервисов на trust-aware связку на всех mTLS-листенерах. Это
 дисциплина сервисных репо (kacho-vpc/compute/iam/...), а не corelib; corelib уже
 предоставляет безопасную связку и предупреждает об опасном примитиве.
+
+## 5. `authz` `AllowSystemPrincipal` — system-bypass гейтится Type+ID, не одним заголовком
+
+**Рубрика:** CWE-863 — доверие к client-supplied principal-id.
+
+**Как есть:** при `AllowSystemPrincipal=true` interceptor пропускает без per-RPC
+Check только принципала с полной system-идентичностью
+`Principal{Type:"system", ID:"bootstrap"}`. Матч по одному лишь `principalID ==
+"bootstrap"` (id derivable из заголовка `x-kacho-principal-id`) — устранён: теперь
+дополнительно перечитывается canonical, type-carrying principal из ctx и требуется
+`Type=="system"`. Подделанный `{Type:"user", ID:"bootstrap"}` больше не обходит
+Check, а проваливается в обычный путь (fail-closed). Регрессионный тест —
+`TestInterceptor_AllowSystemPrincipal_RejectsForgedBootstrapType`.
+
+**Почему это лишь частичное усиление (задокументировано):** type-gate закрывает
+type-confusion-вектор, но НЕ аутентифицирует peer'а сам по себе. Если оператор
+смонтирует non-trust-aware `UnaryPrincipalExtract` на peer-достижимый listener и
+включит `AllowSystemPrincipal=true`, атакующий всё ещё может послать
+`x-kacho-principal-type: system` + `id: bootstrap`. Это тот же остаточный
+header-trust-риск, что и в §4.
+
+**Правило эксплуатации:** `AllowSystemPrincipal` (по умолчанию `false`) включать
+ТОЛЬКО на listener'е, куда не дозвонится недоверенный peer, ИЛИ в связке с
+trust-aware `UnaryTrustedPrincipalExtract(WithTrustedForwarders(...))` (§4). Corelib
+энфорсит форму идентичности; аутентичность транспорта — дисциплина composition-root'а.
+
+## 6. `validate.resourceIDPrefixes` — env читается при package-init
+
+**Рубрика:** Clean-Architecture — «wiring/чтение env только в composition-root».
+
+**Как есть:** `var resourceIDPrefixes = buildResourceIDPrefixes(os.Getenv(
+EnvExtraResourceIDPrefixes))` вычисляется один раз при импорте пакета и замораживается
+в package-global на весь процесс.
+
+**Почему принято (пока):** реестр префиксов — статическая платформенная константа
+(3-символьные id-префиксы доменов, §3), а `KACHO_EXTRA_RESOURCE_ID_PREFIXES` —
+опциональный аддитивный оверрайд для нового домена до его выпуска. Значение не
+меняется в рантайме и одинаково для всех потребителей → package-level кэш
+семантически корректен.
+
+**Известный hazard (задокументирован):** env, выставленный ПОСЛЕ импорта пакета
+(напр. в тесте), игнорируется — значение залатчено при init. Тесты, которым нужен
+иной набор префиксов, должны выставлять env до первого импорта `validate` (или не
+полагаться на этот путь). Перенос в конструктор (`NewResourceIDValidator(extra
+[]string)`) — эволюция вместе с §3 (реестр → gateway-concern), меняет API
+потребителей и делается тем же кросс-репо шагом.
+
+## 7. `operations.Repo.Get` — unscoped по умолчанию (ownership-scoped вариант отдельным интерфейсом)
+
+**Рубрика:** CWE-639 (IDOR) — «безопасный путь должен быть путём по умолчанию».
+
+**Как есть:** экспортируемый `Repo` интерфейс несёт unscoped `Get(ctx, id)`;
+ownership-scoped `GetOwned/CancelOwned` живут на отдельном `OwnedOperationRepo`
+(реализован конкретным `pgRepo`). Godoc `Repo.Get` теперь несёт явное
+IDOR-предупреждение и указывает на `GetOwned` для tenant-facing
+`OperationService.Get`.
+
+**Почему интерфейс не меняли (contract-safe residual):** повышение
+ownership-scoped-аксессора в основной `Repo`-интерфейс (или добавление `Owner`-арга
+в `Get`) — ломающее изменение Go-интерфейса: все реализации/моки `operations.Repo`
+в сервисных репо (vpc/compute/iam/...) перестанут компилироваться. Это кросс-репо
+API-миграция, вне scope contract-safe прохода. Runtime-риск закрыт doc-hardening'ом
++ наличием `GetOwned`; сервисные handler'ы OperationService.Get уже используют
+owner-scoped путь (`OwnerFromPrincipal` → `GetOwned`/audit).
+
+**Эволюция:** при следующем допустимом изменении Go-API `operations` — сделать
+owner-scoped аксессор дефолтным членом `Repo`, а unscoped — явно именованным
+(`GetUnscoped`) для доверенных internal-вызовов (reconciler/worker).

@@ -14,6 +14,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/PRO-Robotech/kacho-corelib/operations"
 )
 
 // InterceptorOptions — конфигурация gRPC interceptor'а.
@@ -237,7 +239,24 @@ func (i *Interceptor) authorize(ctx context.Context, fullMethod string, req any)
 		return DecisionDenied, nil
 	}
 	if i.opts.AllowSystemPrincipal && principalID == "bootstrap" {
-		return DecisionAllowed, nil
+		// Gate the blanket allow to the GENUINE system identity
+		// (Principal{Type:"system", ID:"bootstrap"}), never a client-supplied
+		// principal-id string alone. The principal-id ("bootstrap") is derivable
+		// from the x-kacho-principal-id header, which the non-trust-aware
+		// UnaryPrincipalExtract honours unconditionally; matching on the id string
+		// alone let a forged {Type:"user", ID:"bootstrap"} skip every per-RPC Check
+		// (CWE-863). We re-read the canonical, type-carrying principal from ctx and
+		// require the full system Type+ID; anything else falls through to the normal
+		// Check path (fail-closed). NOTE: this closes the type-confusion vector but
+		// does NOT by itself authenticate the peer — AllowSystemPrincipal must still
+		// be enabled ONLY on a listener no untrusted peer can reach, or paired with
+		// the trust-aware grpcsrv.UnaryTrustedPrincipalExtract (see
+		// docs/architecture/known-divergences.md).
+		if p, ok := operations.PrincipalFromContextOK(ctx); ok && p.Type == "system" && p.ID == "bootstrap" {
+			return DecisionAllowed, nil
+		}
+		logger.Warn("authz_system_principal_type_mismatch",
+			slog.String("principal_id", principalID))
 	}
 
 	// 4. Object extract.
