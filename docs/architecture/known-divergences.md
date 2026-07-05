@@ -151,27 +151,30 @@ EnvExtraResourceIDPrefixes))` вычисляется один раз при им
 []string)`) — эволюция вместе с §3 (реестр → gateway-concern), меняет API
 потребителей и делается тем же кросс-репо шагом.
 
-## 7. `operations.Repo.Get` — unscoped по умолчанию (ownership-scoped вариант отдельным интерфейсом)
+## 7. `operations.Repo.Get`/`List` — unscoped по умолчанию (ownership-scoped вариант отдельным интерфейсом)
 
 **Рубрика:** CWE-639 (IDOR) — «безопасный путь должен быть путём по умолчанию».
 
-**Как есть:** экспортируемый `Repo` интерфейс несёт unscoped `Get(ctx, id)`;
-ownership-scoped `GetOwned/CancelOwned` живут на отдельном `OwnedOperationRepo`
-(реализован конкретным `pgRepo`). Godoc `Repo.Get` теперь несёт явное
-IDOR-предупреждение и указывает на `GetOwned` для tenant-facing
-`OperationService.Get`.
+**Как есть:** экспортируемый `Repo` интерфейс несёт unscoped `Get(ctx, id)` и
+`List(ctx, filter)` (фильтрует только по caller-supplied `AccountID`/`ResourceID`
+без enforced ownership-предиката); ownership-scoped `GetOwned/ListOwned/CancelOwned`
+живут на отдельном `OwnedOperationRepo` (реализован конкретным `pgRepo`, predicate
+внутри SQL WHERE). Godoc `Repo.Get` и `Repo.List` несут явное IDOR-предупреждение и
+указывают на `GetOwned`/`ListOwned` для tenant-facing `OperationService.Get`/`List`;
+unscoped-путь — только для доверенных internal-вызовов.
 
 **Почему интерфейс не меняли (contract-safe residual):** повышение
-ownership-scoped-аксессора в основной `Repo`-интерфейс (или добавление `Owner`-арга
-в `Get`) — ломающее изменение Go-интерфейса: все реализации/моки `operations.Repo`
-в сервисных репо (vpc/compute/iam/...) перестанут компилироваться. Это кросс-репо
-API-миграция, вне scope contract-safe прохода. Runtime-риск закрыт doc-hardening'ом
-+ наличием `GetOwned`; сервисные handler'ы OperationService.Get уже используют
-owner-scoped путь (`OwnerFromPrincipal` → `GetOwned`/audit).
+ownership-scoped-аксессоров в основной `Repo`-интерфейс (или добавление `Owner`-арга
+в `Get`/`List`) — ломающее изменение Go-интерфейса: все реализации/моки
+`operations.Repo` в сервисных репо (vpc/compute/iam/...) перестанут компилироваться.
+Это кросс-репо API-миграция, вне scope contract-safe прохода. Runtime-риск закрыт
+doc-hardening'ом + наличием `GetOwned`/`ListOwned`; сервисные handler'ы
+OperationService.Get/List уже используют owner-scoped путь (`OwnerFromPrincipal` →
+`GetOwned`/`ListOwned`/audit).
 
 **Эволюция:** при следующем допустимом изменении Go-API `operations` — сделать
-owner-scoped аксессор дефолтным членом `Repo`, а unscoped — явно именованным
-(`GetUnscoped`) для доверенных internal-вызовов (reconciler/worker).
+owner-scoped аксессоры дефолтными членами `Repo`, а unscoped — явно именованными
+(`GetUnscoped`/`ListUnscoped`) для доверенных internal-вызовов (reconciler/worker).
 
 ## 8. `operations.Repo` — единый read+write порт, без CQRS Reader/Writer-разделения
 
@@ -225,3 +228,31 @@ authz-кеша. Дублирование скелета — принятый т�
 
 **Эволюция:** если у кешей сойдутся политика эвикции и модель учёта, извлечь
 `subjectTTLCache[V]` с сохранением clobber-guard в общем `get`-пути.
+
+## 10. `grpcsrv` keepalive-behavioral-тест использует реальное 16s idle-окно
+
+**Рубрика:** testing.md — «нет time.Sleep-based синхронизации / real-clock
+зависимости».
+
+**Как есть:** `TestNewServer_AcceptsIdleKeepalive` (keepalive_integration_test.go)
+делает `time.Sleep(16*time.Second)` и проверяет, что idle-conn остаётся `Ready` и
+follow-up RPC проходит. Тест `-short`-gated (скипается в быстром CI).
+
+**Почему окно нельзя схлопнуть (contract-safe residual):** тест верифицирует
+**реальную production-конфигурацию** сервера — `DefaultKeepaliveEnforcement`
+(`MinTime=5s`) против клиента, пингующего каждые `6s`, через окно `> 2` ping-
+интервалов. Это единственный способ подтвердить, что server-enforcement НЕ строже
+клиентского keepalive (иначе прилетел бы `GOAWAY too_many_pings` и inter-service
+idle-conn стуллился бы). Уменьшить окно до сотен мс невозможно test-only: клиентский
+ping < `MinTime=5s` сам спровоцировал бы `GOAWAY` и **инвертировал** бы проверку;
+а параметризация keepalive-констант под тест — это правка прод-кода фабрики
+`NewServer`, меняющая то самое поведение, которое тест валидирует.
+
+**Митигация:** тест `-short`-gated, поэтому обычный быстрый CI его не гоняет;
+16s-окно платится только в полном integration-прогоне, где интеграционные тесты и так
+поднимают testcontainers. Real-clock-зависимость здесь — не флейк-паттерн, а
+неотъемлемое свойство проверки таймингового контракта keepalive.
+
+**Эволюция:** если появится тестовая фабрика с инъектируемым (но по-прежнему
+production-репрезентативным) keepalive-профилем, окно можно пропорционально сжать,
+сохранив соотношение client-ping < server-MinTime.

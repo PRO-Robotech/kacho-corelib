@@ -77,7 +77,6 @@ func TestHasKnownPrefix_AcceptsValid(t *testing.T) {
 		PrefixRouteTable, PrefixSecurityGroup, PrefixGateway,
 		PrefixNetworkInterface, PrefixAddressPool, PrefixAnycastPool,
 		PrefixLoadBalancer, PrefixListener, PrefixTargetGroup,
-		PrefixGlobalLoadBalancer,
 	} {
 		id := NewID(p)
 		require.True(t, HasKnownPrefix(id), "id=%q (prefix=%q)", id, p)
@@ -91,7 +90,6 @@ func TestHasKnownPrefix_AcceptsValid(t *testing.T) {
 func TestIsValid_NLBPrefixes(t *testing.T) {
 	for _, p := range []string{
 		PrefixLoadBalancer, PrefixListener, PrefixTargetGroup,
-		PrefixGlobalLoadBalancer,
 	} {
 		id := NewID(p)
 		require.Len(t, id, 20, "prefix=%q", p)
@@ -138,7 +136,6 @@ func TestKnownPrefixes_EveryConstantIsMember(t *testing.T) {
 		"PrefixLoadBalancer":       PrefixLoadBalancer,
 		"PrefixListener":           PrefixListener,
 		"PrefixTargetGroup":        PrefixTargetGroup,
-		"PrefixGlobalLoadBalancer": PrefixGlobalLoadBalancer,
 		"PrefixApplication":        PrefixApplication,
 		"PrefixRegistry":           PrefixRegistry,
 		"PrefixOperationReg":       PrefixOperationReg,

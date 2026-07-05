@@ -5,6 +5,7 @@ package authz
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -154,5 +155,51 @@ func TestRateLimiter_EvictInactive(t *testing.T) {
 	}
 	if _, ok := rl.buckets["usr_fresh"]; !ok {
 		t.Fatalf("usr_fresh bucket must survive")
+	}
+}
+
+// TestRateLimiter_Concurrent — data-race guard: rateLimiter documented Thread-safe,
+// но до этого теста ни один кейс не гонял Allow/EvictInactive из нескольких
+// goroutine (в отличие от Cache, у которого есть TestCache_Concurrent). Спавним N
+// goroutine, бьющих Allow по пересекающимся И уникальным subject-id, пока ещё одна
+// goroutine периодически зовёт EvictInactive — весь map/bucket-mutation-путь под
+// rl.mu. Прогоняется под -race; падает (concurrent map write / detected race), если
+// будущая оптимизация сузит или уберёт lock в Allow или eviction-sweep.
+func TestRateLimiter_Concurrent(t *testing.T) {
+	rl := newRateLimiter(1000) // положительный rate → Allow идёт по locked-пути
+	const goroutines = 32
+	const iterations = 500
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines + 1)
+
+	// Writer-heavy: Allow по overlapping (usr_shared_%2) и уникальным (usr_g%d_i%d)
+	// subject'ам — вставка новых bucket'ов конкурирует с eviction-sweep'ом.
+	for g := 0; g < goroutines; g++ {
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				if i%2 == 0 {
+					rl.Allow(fmt.Sprintf("usr_shared_%d", i%2))
+				} else {
+					rl.Allow(fmt.Sprintf("usr_g%d_i%d", g, i))
+				}
+			}
+		}(g)
+	}
+
+	// Конкурентный eviction-sweep на том же mutation-пути.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			rl.EvictInactive(time.Nanosecond)
+		}
+	}()
+
+	wg.Wait()
+
+	// Sanity: лимитер работоспособен после конкурентной нагрузки.
+	if !rl.Allow("usr_after_load") {
+		t.Fatalf("rate limiter must admit a fresh subject after concurrent load")
 	}
 }
