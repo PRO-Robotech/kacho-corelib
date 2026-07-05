@@ -4,6 +4,7 @@
 package authz
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -96,6 +97,36 @@ func TestRateLimiter_RefillCapsAtBurst(t *testing.T) {
 	}
 	if got != 20 {
 		t.Fatalf("expected refill capped at burst=20, got %d", got)
+	}
+}
+
+// TestRateLimiter_HardCapBoundsBuckets — buckets map имеет собственный жёсткий
+// потолок (CWE-770): при churn'е из множества уникальных principal-id map НЕ
+// растёт неограниченно даже без внешнего EvictInactive-sweep'а.
+func TestRateLimiter_HardCapBoundsBuckets(t *testing.T) {
+	clk := &clock{t: time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC)}
+	rl := newRateLimiterWithLimit(10, 100) // cap = 100 bucket'ов
+	rl.now = clk.now
+
+	// 10_000 уникальных subject'ов — на порядки больше потолка. Без внутренней
+	// границы map вырос бы до 10k (OOM-вектор).
+	for i := 0; i < 10_000; i++ {
+		rl.Allow(fmt.Sprintf("usr_%d", i))
+		if len(rl.buckets) > 100 {
+			t.Fatalf("buckets exceeded hard cap: got %d at i=%d", len(rl.buckets), i)
+		}
+	}
+	if len(rl.buckets) == 0 {
+		t.Fatalf("expected some live buckets, got 0")
+	}
+}
+
+// TestRateLimiter_DefaultCapPresent — конструктор по умолчанию ставит непустой
+// внутренний потолок (не 0 = unbounded).
+func TestRateLimiter_DefaultCapPresent(t *testing.T) {
+	rl := newRateLimiter(10)
+	if rl.maxBuckets <= 0 {
+		t.Fatalf("default rate limiter must carry a positive maxBuckets, got %d", rl.maxBuckets)
 	}
 }
 

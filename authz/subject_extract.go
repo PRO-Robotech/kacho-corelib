@@ -27,6 +27,13 @@ func defaultSubjectExtractor(ctx context.Context) (string, string, bool) {
 	if !ok || p.ID == "" {
 		return "", "", false
 	}
+	// principal id приходит из недоверенного x-kacho-principal-id header'а. Если
+	// он несёт FGA-разделители (':' / '#' / '@' / whitespace) — трактуем как
+	// anonymous (ok=false → interceptor fail-closed deny), а НЕ собираем из него
+	// инъекционно-оформленный subject. Симметрично FormatObject-валидации объекта.
+	if !validSubjectID(p.ID) {
+		return "", "", false
+	}
 	return FormatSubject(p.Type, p.ID), p.ID, true
 }
 

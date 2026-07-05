@@ -6,7 +6,36 @@ package authz
 import (
 	"context"
 	"testing"
+
+	"github.com/PRO-Robotech/kacho-corelib/operations"
 )
+
+// TestDefaultSubjectExtractor_RejectsMalformedPrincipalID — principalID,
+// приходящий из недоверенного x-kacho-principal-id header'а, содержащий
+// FGA-разделители, должен трактоваться как anonymous (ok=false → interceptor
+// fail-closed deny), а не собираться в subject-строку с инъекцией.
+func TestDefaultSubjectExtractor_RejectsMalformedPrincipalID(t *testing.T) {
+	for _, id := range []string{"usr_x#member", "usr_x:usr_y", "usr_x y", "usr_x\ty", "usr_x\ny", "usr_x@e"} {
+		ctx := operations.WithPrincipal(context.Background(), operations.Principal{
+			Type: "user", ID: id, DisplayName: id,
+		})
+		if _, _, ok := defaultSubjectExtractor(ctx); ok {
+			t.Fatalf("malformed principal id %q must yield ok=false (fail-closed), got ok=true", id)
+		}
+	}
+}
+
+// TestDefaultSubjectExtractor_AcceptsValidPrincipalID — корректный принципал
+// проходит (ok=true) и даёт правильный subject.
+func TestDefaultSubjectExtractor_AcceptsValidPrincipalID(t *testing.T) {
+	ctx := operations.WithPrincipal(context.Background(), operations.Principal{
+		Type: "user", ID: "usr_alice", DisplayName: "alice",
+	})
+	subj, pid, ok := defaultSubjectExtractor(ctx)
+	if !ok || subj != "user:usr_alice" || pid != "usr_alice" {
+		t.Fatalf("valid principal: got (%q,%q,%v), want (user:usr_alice,usr_alice,true)", subj, pid, ok)
+	}
+}
 
 // stubExtract возвращает фиксированный (subjectFGA, principalID, ok) — позволяет
 // напрямую подать каждую комбинацию closed-list'а в isAnonymousSubject без

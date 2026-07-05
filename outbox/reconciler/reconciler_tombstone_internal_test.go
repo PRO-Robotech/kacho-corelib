@@ -20,6 +20,26 @@ func (f *fakeEnumerator) ResourceExists(_ context.Context, _, id string) (bool, 
 	return f.exists[id], nil
 }
 
+// TestSanitizeTable_NeutralisesInjection — имя таблицы всегда квотируется через
+// pgx.Identifier: обычное имя → `"name"`, схема-квалифицированное →
+// `"schema"."table"`, а попытка statement-injection экранируется в единый
+// (безвредный) идентификатор, а не разрывается на отдельные statement'ы.
+func TestSanitizeTable_NeutralisesInjection(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"fga_outbox", `"fga_outbox"`},
+		{"kacho_iam.fga_outbox", `"kacho_iam"."fga_outbox"`},
+		// Инъекция: без sanitize `%s` вставил бы второй statement напрямую.
+		{`x"; DROP TABLE users; --`, `"x""; DROP TABLE users; --"`},
+	}
+	for _, tc := range cases {
+		if got := sanitizeTable(tc.in); got != tc.want {
+			t.Fatalf("sanitizeTable(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 type fakeRegistry struct{ tuples []RegisteredTuple }
 
 func (f *fakeRegistry) ListRegistered(context.Context) ([]RegisteredTuple, error) {

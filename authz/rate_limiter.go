@@ -29,6 +29,12 @@ type rateLimiter struct {
 	// buckets: subjectID → bucket-state.
 	buckets map[string]*bucket
 
+	// maxBuckets — жёсткий внутренний потолок числа bucket'ов (CWE-770): память
+	// ограничена даже если composition root не расписал периодический
+	// EvictInactive-sweep или под churn'ом уникальных principal-id (id
+	// пере-трогаются быстрее maxAge). Зеркалит Cache.maxEntries.
+	maxBuckets int
+
 	now func() time.Time
 }
 
@@ -37,15 +43,29 @@ type bucket struct {
 	lastSeen time.Time
 }
 
+// defaultMaxBuckets — потолок числа rate-limiter bucket'ов по умолчанию
+// (CWE-770). Один bucket ≈ несколько десятков байт → 100k ≈ единицы МБ.
+const defaultMaxBuckets = 100_000
+
 // newRateLimiter создает лимитер. ratePerSec ≤ 0 → disabled (Allow всегда true).
 func newRateLimiter(ratePerSec float64) *rateLimiter {
+	return newRateLimiterWithLimit(ratePerSec, defaultMaxBuckets)
+}
+
+// newRateLimiterWithLimit — как newRateLimiter, но с явным потолком bucket'ов.
+// maxBuckets ≤ 0 → defaultMaxBuckets.
+func newRateLimiterWithLimit(ratePerSec float64, maxBuckets int) *rateLimiter {
 	if ratePerSec < 0 {
 		ratePerSec = 0
+	}
+	if maxBuckets <= 0 {
+		maxBuckets = defaultMaxBuckets
 	}
 	return &rateLimiter{
 		ratePerSec: ratePerSec,
 		burst:      ratePerSec * 2,
 		buckets:    make(map[string]*bucket, 64),
+		maxBuckets: maxBuckets,
 		now:        time.Now,
 	}
 }
@@ -63,7 +83,11 @@ func (rl *rateLimiter) Allow(subjectID string) bool {
 	now := rl.now()
 	b, exists := rl.buckets[subjectID]
 	if !exists {
-		// Новый subject — начинаем с full burst.
+		// Новый subject — начинаем с full burst. Перед вставкой держим потолок:
+		// при достижении maxBuckets освобождаем место (CWE-770).
+		if len(rl.buckets) >= rl.maxBuckets {
+			rl.evictForInsertLocked()
+		}
 		b = &bucket{tokens: rl.burst, lastSeen: now}
 		rl.buckets[subjectID] = b
 	}
@@ -79,6 +103,35 @@ func (rl *rateLimiter) Allow(subjectID string) bool {
 	}
 	b.tokens -= 1.0
 	return true
+}
+
+// evictForInsertLocked освобождает место в buckets при достижении потолка
+// maxBuckets. Вызывается под rl.mu. Стратегия (зеркалит Cache.evictLocked):
+// сначала выбрасывает полностью пополненные (idle) bucket'ы — их удаление
+// поведенчески нейтрально (повторный Allow создаёт такой же full-burst bucket);
+// если и после этого полно — выбрасывает произвольные до low-water (7/8).
+// Худший эффект произвольной эвикции — сброс частично израсходованного bucket'а
+// в full burst (кратковременно ослабляет лимит для ОДНОГО subject'а под
+// экстремальным churn'ом), что приемлемо ради жёсткого потолка памяти.
+func (rl *rateLimiter) evictForInsertLocked() {
+	for s, b := range rl.buckets {
+		if b.tokens >= rl.burst {
+			delete(rl.buckets, s)
+		}
+	}
+	if len(rl.buckets) < rl.maxBuckets {
+		return
+	}
+	target := rl.maxBuckets - rl.maxBuckets/8
+	if target < 0 {
+		target = 0
+	}
+	for s := range rl.buckets {
+		if len(rl.buckets) <= target {
+			break
+		}
+		delete(rl.buckets, s)
+	}
 }
 
 // EvictInactive удаляет subject-bucket'ы, у которых lastSeen старше maxAge.

@@ -59,6 +59,31 @@ func testCfg() drainer.Config {
 	}
 }
 
+// waitForListenerReady blocks until a backend is registered LISTENing on channel
+// — its last statement in pg_stat_activity is `LISTEN <channel>` (the drainer's
+// dedicated hijacked conn runs exactly that and then parks in
+// WaitForNotification). This replaces a fixed pre-insert time.Sleep guess with a
+// positive readiness signal, so the NOTIFY-path assertions no longer race the
+// LISTEN registration under CI contention (a missed NOTIFY would otherwise fall
+// to PollFallback and blow the tight NOTIFY deadline).
+func waitForListenerReady(t *testing.T, ctx context.Context, pool *pgxpool.Pool, channel string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM pg_stat_activity WHERE query = $1`,
+			"LISTEN "+channel).Scan(&n); err != nil {
+			require.NoError(t, err)
+		}
+		if n > 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("drainer LISTEN on %q did not register within 5s", channel)
+}
+
 // testLogger returns a discard slog.Logger so test output stays clean.
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
@@ -126,8 +151,9 @@ func TestW1_1_01_SingleInsert_AppliedWithin500ms(t *testing.T) {
 	dCancel, done, _ := startDrainer(t, ctx, pool, testCfg(), fa)
 	defer func() { dCancel(); <-done }()
 
-	// Allow LISTEN to register before INSERT (drainer started ~100ms ago).
-	time.Sleep(150 * time.Millisecond)
+	// Wait for the drainer LISTEN to register before INSERT (positive readiness
+	// signal instead of a fixed wall-clock guess).
+	waitForListenerReady(t, ctx, pool, testCfg().Channel)
 
 	id := insertOutboxRow(t, ctx, pool, "fga.tuple.write",
 		`{"user":"user:usr01","relation":"system_admin","object":"cluster:default"}`)
@@ -204,7 +230,7 @@ func TestW1_1_03_DeleteEventApplied(t *testing.T) {
 	dCancel, done, _ := startDrainer(t, ctx, pool, testCfg(), fa)
 	defer func() { dCancel(); <-done }()
 
-	time.Sleep(150 * time.Millisecond)
+	waitForListenerReady(t, ctx, pool, testCfg().Channel)
 
 	id := insertOutboxRow(t, ctx, pool, "fga.tuple.delete",
 		`{"user":"user:usr01","relation":"system_admin","object":"cluster:default"}`)
@@ -234,7 +260,7 @@ func TestW1_1_04_IdempotentErrAlreadyApplied_SuccessPath(t *testing.T) {
 	dCancel, done, _ := startDrainer(t, ctx, pool, testCfg(), fa)
 	defer func() { dCancel(); <-done }()
 
-	time.Sleep(150 * time.Millisecond)
+	waitForListenerReady(t, ctx, pool, testCfg().Channel)
 	id := insertOutboxRow(t, ctx, pool, "fga.tuple.write",
 		`{"user":"user:usr02","relation":"viewer","object":"project:p"}`)
 
@@ -270,7 +296,7 @@ func TestW1_1_05_TransientError_ExpBackoffRetry_EventualSuccess(t *testing.T) {
 	dCancel, done, _ := startDrainer(t, ctx, pool, cfg, fa)
 	defer func() { dCancel(); <-done }()
 
-	time.Sleep(150 * time.Millisecond)
+	waitForListenerReady(t, ctx, pool, testCfg().Channel)
 	id := insertOutboxRow(t, ctx, pool, "fga.tuple.write",
 		`{"user":"user:usr05","relation":"viewer","object":"project:p"}`)
 
@@ -319,7 +345,7 @@ func TestW1_1_06_PermanentError_PoisonAndContinue(t *testing.T) {
 	dCancel, done, _ := startDrainer(t, ctx, pool, testCfg(), fa)
 	defer func() { dCancel(); <-done }()
 
-	time.Sleep(150 * time.Millisecond)
+	waitForListenerReady(t, ctx, pool, testCfg().Channel)
 	idA := insertOutboxRow(t, ctx, pool, "fga.tuple.write",
 		`{"user":"BAD:usr","relation":"viewer","object":"project:p"}`)
 	time.Sleep(100 * time.Millisecond)
@@ -380,7 +406,7 @@ func TestW1_1_07_DecoderFail_PermanentError(t *testing.T) {
 	go func() { defer close(done); _ = d.Run(dCtx) }()
 	defer func() { dCancel(); <-done }()
 
-	time.Sleep(150 * time.Millisecond)
+	waitForListenerReady(t, ctx, pool, testCfg().Channel)
 	id := insertOutboxRow(t, ctx, pool, "fga.tuple.write",
 		`{"missing_required_field": true}`)
 
@@ -412,7 +438,7 @@ func TestW1_1_08_ConnectionDrop_ReconnectAndCatchup(t *testing.T) {
 	dCancel, done, _ := startDrainer(t, ctx, pool, testCfg(), fa)
 	defer func() { dCancel(); <-done }()
 
-	time.Sleep(150 * time.Millisecond)
+	waitForListenerReady(t, ctx, pool, testCfg().Channel)
 
 	// 1) Process one row to confirm drainer is alive.
 	id1 := insertOutboxRow(t, ctx, pool, "fga.tuple.write",
@@ -464,7 +490,7 @@ func TestW1_1_09_TwoConcurrentInserts_ExactlyOnce(t *testing.T) {
 	dCancel, done, _ := startDrainer(t, ctx, pool, testCfg(), fa)
 	defer func() { dCancel(); <-done }()
 
-	time.Sleep(150 * time.Millisecond)
+	waitForListenerReady(t, ctx, pool, testCfg().Channel)
 
 	const n = 10
 	var wg sync.WaitGroup
@@ -616,7 +642,7 @@ func TestW1_1_11_CtxCancel_FinishesInflightApply_CleanExit(t *testing.T) {
 
 	dCancel, done, errCh := startDrainer(t, ctx, pool, testCfg(), fa)
 
-	time.Sleep(150 * time.Millisecond)
+	waitForListenerReady(t, ctx, pool, testCfg().Channel)
 	id := insertOutboxRow(t, ctx, pool, "fga.tuple.write",
 		`{"user":"user:slow","relation":"viewer","object":"project:p"}`)
 
@@ -743,7 +769,7 @@ func TestW1_1_14_ReapplyAfterRestart_FilteredBySentAt(t *testing.T) {
 
 	// Drainer 1: process one row, then exit.
 	dCancel1, done1, _ := startDrainer(t, ctx, pool, testCfg(), fa1)
-	time.Sleep(150 * time.Millisecond)
+	waitForListenerReady(t, ctx, pool, testCfg().Channel)
 	id := insertOutboxRow(t, ctx, pool, "fga.tuple.write",
 		`{"user":"user:once","relation":"viewer","object":"project:p"}`)
 	waitForRowSent(t, ctx, pool, id, 1*time.Second)
