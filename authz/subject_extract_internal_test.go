@@ -49,7 +49,7 @@ func TestIsAnonymousSubject_ClosedList(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := isAnonymousSubject(stubExtract(tc.subjectFGA, tc.principalID, tc.ok), context.Background())
+			got := isAnonymousSubject(context.Background(), stubExtract(tc.subjectFGA, tc.principalID, tc.ok))
 			if got != tc.want {
 				t.Fatalf("isAnonymousSubject(subject=%q, principalID=%q, ok=%v) = %v, want %v",
 					tc.subjectFGA, tc.principalID, tc.ok, got, tc.want)

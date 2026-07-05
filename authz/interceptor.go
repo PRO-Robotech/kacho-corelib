@@ -196,7 +196,7 @@ func (i *Interceptor) authorize(ctx context.Context, fullMethod string, req any)
 	// ресурсы — он лишь эмулирует "all authenticated users allowed", не
 	// "everyone allowed".
 	if i.opts.Breakglass {
-		if isAnonymousSubject(i.opts.SubjectExtractor, ctx) {
+		if isAnonymousSubject(ctx, i.opts.SubjectExtractor) {
 			atomic.AddUint64(&i.deniedTotal, 1)
 			logger.Warn("authz_breakglass_anonymous_denied")
 			return DecisionDenied, nil

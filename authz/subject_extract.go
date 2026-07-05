@@ -42,7 +42,7 @@ func defaultSubjectExtractor(ctx context.Context) (string, string, bool) {
 //
 // Используется в breakglass-path: даже когда authz-Check недоступен,
 // anonymous request'ы должны быть denied.
-func isAnonymousSubject(extract func(context.Context) (string, string, bool), ctx context.Context) bool {
+func isAnonymousSubject(ctx context.Context, extract func(context.Context) (string, string, bool)) bool {
 	subjectFGA, principalID, ok := extract(ctx)
 	if !ok || principalID == "" || subjectFGA == "" {
 		return true
