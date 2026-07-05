@@ -21,9 +21,11 @@ import (
 //   - idle_in_transaction_session_timeout=60s — потолок «idle-in-transaction»
 //     (транзакция открыта, но не исполняет запрос). Дренер держит claim-tx
 //     открытой на время applier-вызова (~5s), reconciler.Sweep — на время
-//     одного Resolve (~10s, ResolveTimeout); между итерациями Sweep исполняет
-//     markDoneCAS/markErrorCAS (statement сбрасывает idle-таймер), поэтому
-//     непрерывный idle ограничен ResolveTimeout, а не суммой по батчу. 60s
+//     одного Resolve (~10s, ResolveTimeout). На каждой итерации Sweep сбрасывает
+//     idle-таймер statement'ом: ветки Done/Interrupted — через markDoneCAS/
+//     markErrorCAS, а ветки Skip/resolver-error — через явный keep-alive
+//     (reconciler.keepClaimAlive: SELECT 1). Поэтому непрерывный idle ограничен
+//     одним ResolveTimeout на любой ветке, а не суммой по батчу. 60s
 //     даёт запас ~6x над этим потолком и при этом жёстко реапит по-настоящему
 //     зависшую tx (минуты), которую app-side ctx проглядел (CGO/DNS-stall,
 //     игнорирующий cancel) — иначе она держала бы FOR UPDATE SKIP LOCKED

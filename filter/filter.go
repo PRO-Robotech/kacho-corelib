@@ -22,8 +22,18 @@ package filter
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 )
+
+// safeFieldRe — идентификатор-колонка, безопасная для дословной подстановки в SQL:
+// ровно то подмножество символов, которое эмитит Parse (буквы/цифры/подчёркивание/
+// точка, начиная с буквы или подчёркивания). Любое отклонение (пробел, кавычка,
+// оператор, скобка) означает, что Field сконструирован в обход Parse-whitelist'а и
+// подлежит защитному quoting'у.
+var safeFieldRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_.]*$`)
 
 // FilterAST — узел AST. Для текущего узла-минимума: одно equals.
 type FilterAST struct {
@@ -130,5 +140,16 @@ func isAlpha(b byte) bool {
 //
 //	→ ("name = $3", []any{"foo"}, nil)
 func (a *FilterAST) ToSQL(argStartIdx int) (string, []any) {
-	return fmt.Sprintf("%s = $%d", a.Field, argStartIdx), []any{a.Value}
+	// Value параметризуется ($N) — инъекция через него невозможна. Field же
+	// конкатенируется в SQL, поэтому его безопасность держится на Parse-whitelist'е
+	// (allowedFields). Defense-in-depth: FilterAST, собранный напрямую в обход Parse,
+	// мог бы пронести инъекцию в Field. Дословно эмитим только идентификатор-safe
+	// Field; иначе — защитно оборачиваем через pgx.Identifier.Sanitize (двойные
+	// кавычки + экранирование), гарантируя невозможность выхода за пределы
+	// идентификатора (CWE-89). Легитимные поля из Parse всегда проходят verbatim.
+	field := a.Field
+	if !safeFieldRe.MatchString(field) {
+		field = pgx.Identifier{a.Field}.Sanitize()
+	}
+	return fmt.Sprintf("%s = $%d", field, argStartIdx), []any{a.Value}
 }
