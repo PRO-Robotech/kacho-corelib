@@ -260,6 +260,45 @@ func (f *fakeApplier) waitForCalls(want int, timeout time.Duration) bool {
 	return f.countCalls() >= want
 }
 
+// waitStableInt64 is a bounded quiescence poll for exactly-once assertions.
+//
+// It polls sample() until it reaches `want`, then verifies the value STAYS
+// exactly `want` for `stableFor`. Any overshoot (sample() > want) — a duplicate
+// event — is detected and returned as ok=false the instant it happens (fail-fast),
+// rather than being missed by a single fixed settle-sleep window. Returns the
+// last observed value and ok=true only if `want` was reached and held stable.
+//
+// This is the sound replacement for `time.Sleep(settle); assert(count==want)`:
+// proving the ABSENCE of a late duplicate by re-sampling across the window and
+// failing on the first overshoot, instead of reading the counter once after an
+// arbitrary delay (which a duplicate arriving after the sleep would escape).
+func waitStableInt64(sample func() int64, want int64, stableFor, timeout time.Duration) (int64, bool) {
+	deadline := time.Now().Add(timeout)
+	// Phase 1: reach `want`. An overshoot here already means a duplicate.
+	for {
+		v := sample()
+		if v > want {
+			return v, false
+		}
+		if v == want {
+			break
+		}
+		if time.Now().After(deadline) {
+			return v, false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Phase 2: quiescence — value must remain == want for the whole window.
+	stableDeadline := time.Now().Add(stableFor)
+	for time.Now().Before(stableDeadline) {
+		if v := sample(); v != want {
+			return v, false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return want, true
+}
+
 // insertOutboxRow inserts a single row into kacho_iam.fga_outbox.
 // Returns the auto-assigned id.
 func insertOutboxRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, eventType, payload string) int64 {

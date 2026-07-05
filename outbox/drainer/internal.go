@@ -160,6 +160,9 @@ type claimedRow struct {
 // Возвращает (rows, tx, err). На err == nil И len(rows) > 0 — caller ОБЯЗАН
 // finishClaim(tx, ...) после apply.
 func (d *Drainer[T]) claimRows(ctx context.Context, limit int) ([]claimedRow, pgx.Tx, error) {
+	if d.onClaim != nil {
+		d.onClaim()
+	}
 	tx, err := d.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, nil, fmt.Errorf("begin claim tx: %w", err)

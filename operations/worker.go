@@ -514,11 +514,26 @@ func (w *Worker) terminalWrite(repo Repo, opID, opName string, write func(contex
 	}
 }
 
-// Run — backward-compatible API: запускает worker в default-registry.
+// Run — backward-compatible API: запускает worker в package-level default-registry.
 //
 // callerCtx — request-context handler-а. Из него извлекаются observability-values
 // (OTel SpanContext, request-id, slog logger) через baggage.Extract — они
 // propagate'ятся в worker-ctx. worker НЕ наследует deadline/cancel callerCtx.
+//
+// ВНИМАНИЕ (footgun — single dispatch/drain target): default-registry — это
+// ГЛОБАЛЬНЫЙ Worker. Сервис ОБЯЗАН выбрать РОВНО ОДНУ цель dispatch/drain и
+// придерживаться её на всех путях:
+//   - либо composition root владеет default-registry (ConfigureDefault → Start →
+//     Wait на shutdown) и ВЕСЬ код диспетчит через package-level Run;
+//   - либо composition root создаёт свой Worker (NewWorker) и ВЕСЬ код диспетчит
+//     через RunWithWorker(w, …), а на shutdown дренирует ИМЕННО его (w.Wait).
+//
+// Смешивание (часть кода → Run на default-registry, а shutdown дренирует лишь
+// свой NewWorker) приводит к тому, что in-flight операции на НЕ-дренируемом
+// registry бросаются на перезапуске: терминальная запись (done=true) не
+// происходит до тех пор, пока их не добёрет reconciler, и клиент, поллящий
+// OperationService.Get, видит «застрявшую» операцию через рестарт. Предпочитайте
+// явный NewWorker + RunWithWorker (DI из composition root).
 func Run(callerCtx context.Context, repo Repo, opID string, fn func(context.Context) (*anypb.Any, error)) {
 	defaultRegistry.runOn(callerCtx, repo, opID, fn)
 }

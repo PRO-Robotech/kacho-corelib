@@ -38,4 +38,14 @@ func TestNewPool_PingsAndStatementTimeoutSet(t *testing.T) {
 	var st string
 	require.NoError(t, pool.QueryRow(ctx, "SHOW statement_timeout").Scan(&st))
 	require.Equal(t, "30s", st)
+
+	// idle_in_transaction_session_timeout — server-side guard: reaps a
+	// transaction left idle (open but not executing) longer than the bound,
+	// independent of app-side ctx correctness. Value read in base units (ms)
+	// via pg_settings for a deterministic assertion.
+	var idleTO string
+	require.NoError(t, pool.QueryRow(ctx,
+		"SELECT setting FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout'").Scan(&idleTO))
+	require.Equal(t, "60000", idleTO,
+		"idle_in_transaction_session_timeout must be set (ms) so a hung tx is reaped by Postgres")
 }

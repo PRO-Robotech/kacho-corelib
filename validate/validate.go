@@ -20,7 +20,9 @@ package validate
 
 import (
 	"net"
+	"os"
 	"regexp"
+	"strings"
 	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
@@ -331,7 +333,21 @@ func UpdateMask(field string, mask []string, known map[string]struct{}) error {
 // legacy operation-id), Instance/Disk=epd, Image/Snapshot=fd8. Старые enp/e9b
 // остаются known — family-agnostic проверка не должна давать InvalidArgument на
 // корректные id переходного периода.
-var resourceIDPrefixes = map[string]struct{}{
+// EnvExtraResourceIDPrefixes — имя env-переменной с ДОПОЛНИТЕЛЬНЫМИ известными
+// 3-символьными resource-id prefix'ами (comma-separated, напр. "xyz,qqq").
+// Читается один раз при инициализации пакета и мёржится в базовый набор.
+//
+// Назначение — снять blast-radius «новый домен → InvalidArgument на authz-edge
+// api-gateway, пока corelib не отредактирован и не перевыпущен»: оператор
+// api-gateway задаёт префикс нового семейства через config/env, БЕЗ релиза
+// corelib. Базовые платформенные prefix'ы остаются захардкожены (стабильны,
+// покрыты регрессионным guard-тестом); config-путь — только расширение вперёд.
+const EnvExtraResourceIDPrefixes = "KACHO_EXTRA_RESOURCE_ID_PREFIXES"
+
+// baseResourceIDPrefixes — известные 3-символьные prefix'ы resource-id'ов Kachō,
+// захардкоженные в corelib (стабильное ядро). Расширяется через
+// EnvExtraResourceIDPrefixes без правки этого файла.
+var baseResourceIDPrefixes = map[string]struct{}{
 	// vpc (per-ресурс)
 	"net": {}, "sub": {}, "adr": {}, "rtb": {}, "sgr": {}, "gtw": {}, "nic": {}, "apl": {}, "aap": {},
 	// vpc op-root + legacy общие vpc-префиксы (backward-compat)
@@ -354,6 +370,43 @@ var resourceIDPrefixes = map[string]struct{}{
 	"b1g": {}, "bpf": {}, "epd": {}, "fd8": {},
 }
 
+// parseResourceIDPrefixes нормализует comma-separated значение env в список
+// значимых prefix'ов: обрезает пробелы, приводит к нижнему регистру, отбрасывает
+// пустые и НЕ-ровно-3-символьные токены (family-agnostic ResourceID сверяет
+// только первые 3 символа id — токен иной длины никогда не сматчился бы, поэтому
+// молча его игнорируем как невалидную конфигурацию).
+func parseResourceIDPrefixes(csv string) []string {
+	if strings.TrimSpace(csv) == "" {
+		return nil
+	}
+	var out []string
+	for _, tok := range strings.Split(csv, ",") {
+		p := strings.ToLower(strings.TrimSpace(tok))
+		if len(p) != 3 {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// buildResourceIDPrefixes копирует базовый набор и мёржит в него extra-prefix'ы
+// из config (comma-separated csv). Чистая функция — тестируется без env.
+func buildResourceIDPrefixes(csv string) map[string]struct{} {
+	m := make(map[string]struct{}, len(baseResourceIDPrefixes)+4)
+	for k := range baseResourceIDPrefixes {
+		m[k] = struct{}{}
+	}
+	for _, p := range parseResourceIDPrefixes(csv) {
+		m[p] = struct{}{}
+	}
+	return m
+}
+
+// resourceIDPrefixes — эффективный набор (base + config-extras), собранный один
+// раз при инициализации пакета.
+var resourceIDPrefixes = buildResourceIDPrefixes(os.Getenv(EnvExtraResourceIDPrefixes))
+
 // ResourceID проверяет, что resource-id синтаксически валиден — начинается с
 // известного 3-символьного prefix Kachō (см. resourceIDPrefixes). Пустой id —
 // пропускается (required-проверка / transcoding-роутинг — отдельно).
@@ -367,14 +420,18 @@ var resourceIDPrefixes = map[string]struct{}{
 //
 //	resourceType   — имя ресурса в нижнем регистре ("network", "subnet",
 //	                 "security group", "folder", "gateway", "private endpoint", ...).
-//	expectedPrefix — ожидаемый prefix этого ресурса (ids.PrefixNetwork и т.п.); сейчас
-//	                 в проверке не используется (family-agnostic — см. выше), оставлен
-//	                 в сигнатуре для читаемости call-site'ов и на случай strict-режима.
+//	expectedPrefix — prefix семейства этого ресурса (ids.PrefixNetwork и т.п.).
+//	                 По контракту проверка family-agnostic (см. выше), поэтому
+//	                 значение осознанно НЕ сверяется с id — параметр документирует
+//	                 в call-site'е, какое семейство ожидается, не навязывая strict-
+//	                 сверку. Это не «зарезервировано на будущее»: family-agnostic —
+//	                 конечный контракт (enp-id как subnet-id должен доходить до
+//	                 repo.Get → NotFound, а не отбиваться InvalidArgument здесь).
 //
 // Возвращаемая ошибка — готовый gRPC `status` с нужным flat-message (не
 // field-violation builder — в этом случае контракт требует flat-message).
 func ResourceID(resourceType, expectedPrefix, id string) error {
-	_ = expectedPrefix
+	_ = expectedPrefix // family-agnostic по контракту — см. doc выше.
 	if id == "" {
 		return nil
 	}

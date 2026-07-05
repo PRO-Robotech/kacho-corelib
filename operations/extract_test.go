@@ -137,3 +137,34 @@ func TestExtractResourceID_UnchangedByAccountID(t *testing.T) {
 	assert.Equal(t, "prj-Y", extractResourceID(meta),
 		"extractResourceID должен оставаться первым _id-полем (project_id)")
 }
+
+// TestResolveResourceID_ExplicitWins — если use-case явно задал Operation.ResourceID,
+// именно оно денормализуется в колонку resource_id, а НЕ угаданное reflection'ом
+// первое _id-поле metadata. Это защищает от fragile «первое _id == owning resource»:
+// метаданные, где первым объявлено НЕ-owning поле (folder_id/parent_id), больше не
+// уводят resource_id на чужой id.
+func TestResolveResourceID_ExplicitWins(t *testing.T) {
+	// Метаданные, где ПЕРВЫМ идёт не-owning folder_id, а owning address_id — второй.
+	meta := buildAny(t, "CreateAddressMetadata",
+		[2]string{"folder_id", "prj-owner"},
+		[2]string{"address_id", "adr-real"},
+	)
+	// Reflection взял бы folder_id (первое _id-поле) — это и есть баг.
+	require.Equal(t, "prj-owner", extractResourceID(meta),
+		"sanity: reflection берёт первое _id-поле (folder_id) — фрагильно")
+
+	op := Operation{Metadata: meta, ResourceID: "adr-real"}
+	assert.Equal(t, "adr-real", resolveResourceID(op),
+		"явный Operation.ResourceID должен побеждать reflection-угадывание")
+}
+
+// TestResolveResourceID_ReflectionFallback — если явный ResourceID пуст, остаётся
+// прежнее reflection-поведение (back-compat для существующих use-case'ов).
+func TestResolveResourceID_ReflectionFallback(t *testing.T) {
+	meta := buildAny(t, "CreateNetworkMetadata",
+		[2]string{"network_id", "net-abc"},
+	)
+	op := Operation{Metadata: meta} // ResourceID не задан
+	assert.Equal(t, "net-abc", resolveResourceID(op),
+		"при пустом ResourceID — fallback на reflection (первое _id-поле)")
+}

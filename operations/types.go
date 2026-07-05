@@ -49,6 +49,15 @@ type Operation struct {
 	Error       *status.Status // заполнен если done && ошибка
 	Response    *anypb.Any     // заполнен если done && успех — финальное состояние ресурса
 
+	// ResourceID — id ресурса-владельца операции для денормализованного индекса
+	// operations.resource_id (фильтр List(ListFilter{ResourceID})). Если задан
+	// use-case'ом явно — используется как есть; если пуст — repo падает на
+	// reflection-fallback (первое `*_id`-поле Metadata). Явное значение НАДЁЖНЕЕ:
+	// reflection-угадывание «первое _id == owning resource» ошибётся, если в
+	// *Metadata первым объявлено не-owning поле (folder_id/parent_id/…). Ставьте
+	// его при конструировании операции.
+	ResourceID string
+
 	// Principal — кто инициировал операцию (kacho-iam-resolved). Без auth
 	// заполняется SystemPrincipal(); при наличии auth-ctx — из него через
 	// PrincipalFromContext.
