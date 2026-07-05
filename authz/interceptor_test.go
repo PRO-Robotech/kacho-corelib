@@ -6,6 +6,7 @@ package authz_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/PRO-Robotech/kacho-corelib/operations"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -46,6 +48,15 @@ func makeMap() authz.RPCMap {
 			ScopeFiltered: true,
 			Extract:       authz.StaticExtractor("project", networkExtractor),
 		},
+		// stream-friendly RPC: extractor не зависит от req (stream-interceptor
+		// подаёт nil как req до первого Recv), возвращает фиксированный object —
+		// так authorize() доходит до Check на stream-пути.
+		"/kacho.cloud.vpc.v1.NetworkService/Watch": {
+			Relation: "viewer",
+			Extract: authz.StaticExtractor("vpc_network", func(req any) (string, error) {
+				return "enp00000000000000000", nil
+			}),
+		},
 	}
 }
 
@@ -62,6 +73,33 @@ func runUnary(intr *authz.Interceptor, ctx context.Context, fullMethod string, r
 		return "handled", nil
 	}
 	return intr.Unary()(ctx, req, info, handler)
+}
+
+// fakeServerStream — минимальный grpc.ServerStream, несущий заданный ctx
+// (принципал). Достаточно для того, чтобы Stream-interceptor извлёк authz-decision
+// из ss.Context(); тело stream'а не задействуется.
+type fakeServerStream struct {
+	ctx context.Context
+}
+
+func (s *fakeServerStream) Context() context.Context     { return s.ctx }
+func (s *fakeServerStream) SetHeader(md metadata.MD) error  { return nil }
+func (s *fakeServerStream) SendHeader(md metadata.MD) error { return nil }
+func (s *fakeServerStream) SetTrailer(md metadata.MD)       {}
+func (s *fakeServerStream) SendMsg(m any) error             { return nil }
+func (s *fakeServerStream) RecvMsg(m any) error             { return nil }
+
+// runStream прогоняет Stream-interceptor с ctx-несущим ServerStream и
+// возвращает (handlerCalled, err).
+func runStream(intr *authz.Interceptor, ctx context.Context, fullMethod string) (bool, error) {
+	info := &grpc.StreamServerInfo{FullMethod: fullMethod}
+	called := false
+	handler := func(srv any, ss grpc.ServerStream) error {
+		called = true
+		return nil
+	}
+	err := intr.Stream()(nil, &fakeServerStream{ctx: ctx}, info, handler)
+	return called, err
 }
 
 func TestInterceptor_AllowedOnPositiveCheck(t *testing.T) {
@@ -498,6 +536,190 @@ func TestInterceptor_AllowSystemPrincipal_RejectsForgedBootstrapType(t *testing.
 	}
 	if !checkCalled {
 		t.Fatalf("expected the forged bootstrap to fall through to the per-RPC Check")
+	}
+}
+
+// --- Stream interceptor coverage (finding: Stream() switch arms untested) ---
+
+// TestInterceptorStream_DeniedOnNegativeCheck — stream authz-gate: отрицательный
+// Check → PermissionDenied, handler НЕ вызывается (fail-closed).
+func TestInterceptorStream_DeniedOnNegativeCheck(t *testing.T) {
+	stub := authz.CheckClientFunc(func(ctx context.Context, s, r, o string) (bool, error) {
+		return false, nil
+	})
+	intr := authz.NewInterceptor(authz.InterceptorOptions{Map: makeMap(), Client: stub})
+	ctx := ctxWithPrincipal(t, "usr_bob", "user")
+	called, err := runStream(intr, ctx, "/kacho.cloud.vpc.v1.NetworkService/Watch")
+	if called {
+		t.Fatalf("handler must NOT run on denied stream")
+	}
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied, got %v", err)
+	}
+}
+
+// TestInterceptorStream_UnavailableFailClosed — Check-error (не NoPath) →
+// PermissionDenied на stream'е (DecisionUnavailable arm, fail-closed).
+func TestInterceptorStream_UnavailableFailClosed(t *testing.T) {
+	stub := authz.CheckClientFunc(func(ctx context.Context, s, r, o string) (bool, error) {
+		return false, errors.New("connection refused")
+	})
+	intr := authz.NewInterceptor(authz.InterceptorOptions{Map: makeMap(), Client: stub})
+	ctx := ctxWithPrincipal(t, "usr_alice", "user")
+	called, err := runStream(intr, ctx, "/kacho.cloud.vpc.v1.NetworkService/Watch")
+	if called {
+		t.Fatalf("handler must NOT run when Check unavailable")
+	}
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied (fail-closed), got %v", err)
+	}
+}
+
+// TestInterceptorStream_UnmappedFailClosed — не-замапленный stream-RPC →
+// PermissionDenied (DecisionUnmapped arm).
+func TestInterceptorStream_UnmappedFailClosed(t *testing.T) {
+	stub := authz.CheckClientFunc(func(ctx context.Context, s, r, o string) (bool, error) {
+		t.Fatalf("Check must NOT be called on an unmapped stream RPC")
+		return false, nil
+	})
+	intr := authz.NewInterceptor(authz.InterceptorOptions{Map: makeMap(), Client: stub})
+	ctx := ctxWithPrincipal(t, "usr_alice", "user")
+	called, err := runStream(intr, ctx, "/kacho.cloud.vpc.v1.UnknownService/Subscribe")
+	if called {
+		t.Fatalf("handler must NOT run on unmapped stream RPC")
+	}
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied, got %v", err)
+	}
+}
+
+// TestInterceptorStream_PublicAllowsHandler — Public=true stream-RPC (e.g.
+// InternalResourceLifecycleService.Subscribe) → handler запускается без Check
+// (DecisionInternal arm).
+func TestInterceptorStream_PublicAllowsHandler(t *testing.T) {
+	stub := authz.CheckClientFunc(func(ctx context.Context, s, r, o string) (bool, error) {
+		t.Fatalf("Check must NOT be called on a Public stream RPC")
+		return false, nil
+	})
+	m := makeMap()
+	m["/kacho.cloud.vpc.v1.InternalResourceLifecycleService/Subscribe"] = authz.RPCEntry{Public: true}
+	intr := authz.NewInterceptor(authz.InterceptorOptions{Map: m, Client: stub})
+	ctx := ctxWithPrincipal(t, "usr_alice", "user")
+	called, err := runStream(intr, ctx, "/kacho.cloud.vpc.v1.InternalResourceLifecycleService/Subscribe")
+	if err != nil {
+		t.Fatalf("expected Public stream to pass, got %v", err)
+	}
+	if !called {
+		t.Fatalf("expected handler invoked for Public stream RPC")
+	}
+}
+
+// TestInterceptorStream_NoPathAllowsHandler — ErrNoPath на stream'е →
+// passthrough (DecisionNoPath arm запускает handler; NOT_FOUND отдаст сам stream).
+func TestInterceptorStream_NoPathAllowsHandler(t *testing.T) {
+	stub := authz.CheckClientFunc(func(ctx context.Context, s, r, o string) (bool, error) {
+		return false, authz.ErrNoPath
+	})
+	intr := authz.NewInterceptor(authz.InterceptorOptions{Map: makeMap(), Client: stub})
+	ctx := ctxWithPrincipal(t, "usr_alice", "user")
+	called, err := runStream(intr, ctx, "/kacho.cloud.vpc.v1.NetworkService/Watch")
+	if err != nil {
+		t.Fatalf("expected NoPath passthrough on stream, got %v", err)
+	}
+	if !called {
+		t.Fatalf("expected handler invoked on NoPath passthrough")
+	}
+}
+
+// --- NoPath passthrough (fail-OPEN) branch of authorize() (unary) ---
+
+// TestInterceptor_NoPathPassthroughRunsHandler — ErrNoPath — единственная
+// намеренно-разрешающая ветка: handler запускается (чтобы отдать NOT_FOUND из БД,
+// а не маскировать его как 403). allowed-метрика инкрементится.
+func TestInterceptor_NoPathPassthroughRunsHandler(t *testing.T) {
+	stub := authz.CheckClientFunc(func(ctx context.Context, s, r, o string) (bool, error) {
+		return false, authz.ErrNoPath
+	})
+	intr := authz.NewInterceptor(authz.InterceptorOptions{Map: makeMap(), Client: stub})
+	ctx := ctxWithPrincipal(t, "usr_alice", "user")
+	resp, err := runUnary(intr, ctx, "/kacho.cloud.vpc.v1.NetworkService/Get", &fakeReq{id: "enp_x"})
+	if err != nil {
+		t.Fatalf("expected NoPath passthrough (handler runs), got %v", err)
+	}
+	if resp != "handled" {
+		t.Fatalf("expected handler invoked on NoPath")
+	}
+	if m := intr.Metrics(); m.Allowed == 0 {
+		t.Fatalf("expected allowed metric incremented on NoPath passthrough")
+	}
+}
+
+// TestInterceptor_NoPathBoundary_GenericErrorStillDenies — граница NoPath: ошибка
+// Check, НЕ являющаяся ErrNoPath (даже обёрнутая), обязана оставаться fail-closed
+// (Unavailable → PermissionDenied), чтобы passthrough не «расширился» молча.
+func TestInterceptor_NoPathBoundary_GenericErrorStillDenies(t *testing.T) {
+	stub := authz.CheckClientFunc(func(ctx context.Context, s, r, o string) (bool, error) {
+		return false, fmt.Errorf("wrapped: %w", errors.New("dial timeout"))
+	})
+	intr := authz.NewInterceptor(authz.InterceptorOptions{Map: makeMap(), Client: stub})
+	ctx := ctxWithPrincipal(t, "usr_alice", "user")
+	resp, err := runUnary(intr, ctx, "/kacho.cloud.vpc.v1.NetworkService/Get", &fakeReq{id: "enp_x"})
+	if err == nil {
+		t.Fatalf("expected fail-closed deny for a non-NoPath error, got resp=%v", resp)
+	}
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied (fail-closed), got %v", err)
+	}
+}
+
+// --- Extract / FormatObject failure deny branches of authorize() ---
+
+// TestInterceptor_ObjectExtractErrorDenies — Extract(req) error → PermissionDenied,
+// handler НЕ вызывается (malformed request нельзя пускать к handler'у).
+func TestInterceptor_ObjectExtractErrorDenies(t *testing.T) {
+	handlerCalled := false
+	stub := authz.CheckClientFunc(func(ctx context.Context, s, r, o string) (bool, error) {
+		t.Fatalf("Check must NOT be called when object extract fails")
+		return false, nil
+	})
+	intr := authz.NewInterceptor(authz.InterceptorOptions{Map: makeMap(), Client: stub})
+	ctx := ctxWithPrincipal(t, "usr_alice", "user")
+	// networkExtractor возвращает error для req НЕ-*fakeReq типа.
+	_, err := intr.Unary()(ctx, "not-a-fakeReq",
+		&grpc.UnaryServerInfo{FullMethod: "/kacho.cloud.vpc.v1.NetworkService/Get"},
+		func(ctx context.Context, req any) (any, error) { handlerCalled = true; return nil, nil })
+	if handlerCalled {
+		t.Fatalf("handler must NOT run when object extract fails")
+	}
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied on extract error, got %v", err)
+	}
+}
+
+// TestInterceptor_FormatObjectErrorDenies — extractor вернул пустой object id →
+// FormatObject error → PermissionDenied, handler НЕ вызывается.
+func TestInterceptor_FormatObjectErrorDenies(t *testing.T) {
+	handlerCalled := false
+	stub := authz.CheckClientFunc(func(ctx context.Context, s, r, o string) (bool, error) {
+		t.Fatalf("Check must NOT be called when object id is empty")
+		return false, nil
+	})
+	m := makeMap()
+	// Extractor возвращает ПУСТОЙ id (без ошибки) → FormatObject отбьёт "empty object id".
+	m["/kacho.cloud.vpc.v1.NetworkService/Get"] = authz.RPCEntry{
+		Relation: "viewer",
+		Extract:  authz.StaticExtractor("vpc_network", func(req any) (string, error) { return "", nil }),
+	}
+	intr := authz.NewInterceptor(authz.InterceptorOptions{Map: m, Client: stub})
+	ctx := ctxWithPrincipal(t, "usr_alice", "user")
+	_, err := intr.Unary()(ctx, &fakeReq{id: "x"},
+		&grpc.UnaryServerInfo{FullMethod: "/kacho.cloud.vpc.v1.NetworkService/Get"},
+		func(ctx context.Context, req any) (any, error) { handlerCalled = true; return nil, nil })
+	if handlerCalled {
+		t.Fatalf("handler must NOT run when FormatObject fails")
+	}
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("expected PermissionDenied on FormatObject error, got %v", err)
 	}
 }
 

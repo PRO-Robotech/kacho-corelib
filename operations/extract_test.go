@@ -138,6 +138,34 @@ func TestExtractResourceID_UnchangedByAccountID(t *testing.T) {
 		"extractResourceID должен оставаться первым _id-полем (project_id)")
 }
 
+// TestExtractResourceID_PrefersExplicitResourceIDField — если у metadata есть
+// поле, названное РОВНО resource_id, extractResourceID берёт его, а НЕ первое
+// попавшееся *_id-поле. Иначе denorm-колонка resource_id получала бы чужой id
+// (напр. project_id, объявленный раньше owning resource_id), и List-фильтр по
+// resource_id мис-атрибутировал бы операцию.
+func TestExtractResourceID_PrefersExplicitResourceIDField(t *testing.T) {
+	// project_id объявлено ПЕРВЫМ, resource_id — вторым. Reflection-fallback
+	// «первое _id-поле» вернул бы project_id (баг мис-атрибуции).
+	meta := buildAny(t, "IAMLikeMetadata",
+		[2]string{"project_id", "prj-Y"},
+		[2]string{"resource_id", "usr-real"},
+	)
+	assert.Equal(t, "usr-real", extractResourceID(meta),
+		"явное поле resource_id должно побеждать первое _id-поле (project_id)")
+}
+
+// TestExtractResourceID_ResourceIDFieldEmptyFallsBack — если поле resource_id
+// присутствует, но пустое, extractResourceID откатывается на первое непустое
+// *_id-поле (back-compat: не теряем денорм-ключ из-за пустого явного поля).
+func TestExtractResourceID_ResourceIDFieldEmptyFallsBack(t *testing.T) {
+	meta := buildAny(t, "IAMLikeMetadataEmptyRID",
+		[2]string{"network_id", "net-abc"},
+		[2]string{"resource_id", ""},
+	)
+	assert.Equal(t, "net-abc", extractResourceID(meta),
+		"пустое resource_id → fallback на первое непустое _id-поле")
+}
+
 // TestResolveResourceID_ExplicitWins — если use-case явно задал Operation.ResourceID,
 // именно оно денормализуется в колонку resource_id, а НЕ угаданное reflection'ом
 // первое _id-поле metadata. Это защищает от fragile «первое _id == owning resource»:

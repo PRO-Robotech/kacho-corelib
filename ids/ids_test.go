@@ -112,6 +112,63 @@ func TestHasKnownPrefix_RejectsBadShape(t *testing.T) {
 	require.False(t, HasKnownPrefix(""))
 }
 
+// TestKnownPrefixes_EveryConstantIsMember — guard против drift'а: КАЖДАЯ
+// объявленная Prefix*-константа обязана входить в knownPrefixes. Это ловит
+// повтор бага reg/rop (константа объявлена, но забыта в наборе → HasKnownPrefix
+// ложно отвергал well-formed reg-id, расходясь с validate.ResourceID).
+// Перечисление констант compiler-checked (rename/remove роняет компиляцию).
+func TestKnownPrefixes_EveryConstantIsMember(t *testing.T) {
+	consts := map[string]string{
+		"PrefixCloud":              PrefixCloud,
+		"PrefixFolder":             PrefixFolder,
+		"PrefixOrganization":       PrefixOrganization,
+		"PrefixNetwork":            PrefixNetwork,
+		"PrefixSubnet":             PrefixSubnet,
+		"PrefixAddress":            PrefixAddress,
+		"PrefixRouteTable":         PrefixRouteTable,
+		"PrefixSecurityGroup":      PrefixSecurityGroup,
+		"PrefixGateway":            PrefixGateway,
+		"PrefixNetworkInterface":   PrefixNetworkInterface,
+		"PrefixAddressPool":        PrefixAddressPool,
+		"PrefixAnycastPool":        PrefixAnycastPool,
+		"PrefixInstance":           PrefixInstance,
+		"PrefixDisk":               PrefixDisk,
+		"PrefixImage":              PrefixImage,
+		"PrefixSnapshot":           PrefixSnapshot,
+		"PrefixLoadBalancer":       PrefixLoadBalancer,
+		"PrefixListener":           PrefixListener,
+		"PrefixTargetGroup":        PrefixTargetGroup,
+		"PrefixGlobalLoadBalancer": PrefixGlobalLoadBalancer,
+		"PrefixApplication":        PrefixApplication,
+		"PrefixRegistry":           PrefixRegistry,
+		"PrefixOperationReg":       PrefixOperationReg,
+		"PrefixOperationRM":        PrefixOperationRM,
+		"PrefixOperationVPC":       PrefixOperationVPC,
+		"PrefixOperationCompute":   PrefixOperationCompute,
+		"PrefixOperationNLB":       PrefixOperationNLB,
+		"PrefixOperationApps":      PrefixOperationApps,
+	}
+	for name, val := range consts {
+		if _, ok := knownPrefixes[val]; !ok {
+			t.Errorf("%s = %q is declared but missing from knownPrefixes — "+
+				"HasKnownPrefix would falsely reject well-formed %q ids", name, val, val)
+		}
+	}
+	// reg/rop — регресс-гуард на конкретный найденный drift.
+	require.True(t, HasKnownPrefix(NewID(PrefixRegistry)), "reg-id must be known")
+	require.True(t, HasKnownPrefix(NewID(PrefixOperationReg)), "rop-id must be known")
+}
+
+// TestKnownPrefixes_ReturnsCopy — KnownPrefixes() отдаёт копию: мутация
+// результата не протекает в internal knownPrefixes.
+func TestKnownPrefixes_ReturnsCopy(t *testing.T) {
+	got := KnownPrefixes()
+	got["zzz"] = struct{}{}
+	if _, ok := knownPrefixes["zzz"]; ok {
+		t.Fatalf("KnownPrefixes() must return a copy; mutation leaked into internal set")
+	}
+}
+
 func TestNewUID_LegacyShapeStable(t *testing.T) {
 	uid := NewUID()
 	require.Len(t, uid, 20)

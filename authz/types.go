@@ -247,8 +247,14 @@ func FormatObject(objectType, objectID string) (string, error) {
 // разрешает access через `group:<id>#member` tuple — но subject в Check всегда
 // конкретный user / SA (resolved от Principal в auth-interceptor'е).
 func FormatSubject(principalType, principalID string) string {
-	if principalID == "" {
-		// Защита от вырожденного случая; вызов с пустым ID — bug.
+	if principalID == "" || !validSubjectID(principalID) {
+		// Пустой либо содержащий FGA-разделители (':', '#', '@', whitespace) id —
+		// вырожденный/attack-случай. НЕ конкатенируем его в subject: 'usr_x#member'
+		// стал бы userset-ссылкой, 'usr_x:usr_y' сдвинул бы границу id. Мапим в
+		// неподбираемый sentinel → fail-closed (симметрично FormatObject, который
+		// отвергает те же символы). Первичный gate — defaultSubjectExtractor,
+		// отбивающий такой id ещё до Check; здесь — defense-in-depth для прямых
+		// вызовов FormatSubject.
 		principalID = "unknown"
 	}
 	switch principalType {
@@ -258,4 +264,18 @@ func FormatSubject(principalType, principalID string) string {
 		// system / anonymous / unknown — мапим как user (fallback аудит).
 		return "user:" + principalID
 	}
+}
+
+// validSubjectID возвращает false, если principal id содержит символ, способный
+// изменить семантику FGA-subject строки: ':' (сдвиг границы type:id), '#'
+// (userset-ссылка `type:id#relation`), '@' и whitespace (' '/'\t'/'\n'). Набор
+// симметричен запрещённым символам FormatObject плюс FGA-специфичные '#'/'@'.
+func validSubjectID(id string) bool {
+	for _, r := range id {
+		switch r {
+		case ':', '#', '@', ' ', '\t', '\n':
+			return false
+		}
+	}
+	return true
 }

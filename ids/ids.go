@@ -188,31 +188,56 @@ func IsValid(id, prefix string) bool {
 	return true
 }
 
-// knownPrefixes — множество всех объявленных 3-символьных префиксов ресурсов и
-// операций (по одному представителю на значение; b1g/epd/fd8/nlb разделяются
-// несколькими ресурсами). Источник истины для HasKnownPrefix. При добавлении
-// нового Prefix-константы добавляй ее значение и сюда.
-var knownPrefixes = map[string]struct{}{
-	PrefixCloud:              {}, // b1g (= Folder, OperationRM)
-	PrefixOrganization:       {}, // bpf
-	PrefixNetwork:            {}, // net
-	PrefixSubnet:             {}, // sub
-	PrefixAddress:            {}, // adr
-	PrefixRouteTable:         {}, // rtb
-	PrefixSecurityGroup:      {}, // sgr
-	PrefixGateway:            {}, // gtw
-	PrefixNetworkInterface:   {}, // nic
-	PrefixAddressPool:        {}, // apl
-	PrefixAnycastPool:        {}, // aap
-	PrefixInstance:           {}, // epd (= Disk, OperationCompute)
-	PrefixImage:              {}, // fd8 (= Snapshot)
-	PrefixLoadBalancer:       {}, // nlb (= OperationNLB)
-	PrefixListener:           {}, // lst
-	PrefixTargetGroup:        {}, // tgr
-	PrefixGlobalLoadBalancer: {}, // glb
-	PrefixApplication:        {}, // app
-	PrefixOperationVPC:       {}, // enp
-	PrefixOperationApps:      {}, // aop
+// domainStringPrefixes — 3-символьные prefix'ы доменов, чьи prefix-КОНСТАНТЫ
+// живут не в ids, а в internal/ соответствующего сервиса (kacho-iam — downstream
+// в build-графе, его internal-константы сюда не импортируются, см. запрет
+// «internal не importable»). Перечислены литералами, чтобы ids оставался ЕДИНЫМ
+// источником истины и для HasKnownPrefix, и для validate.baseResourceIDPrefixes
+// (оба выводятся из knownPrefixes / KnownPrefixes()). Плюс legacy shared vpc
+// prefix e9b (backward-compat для id переходного периода).
+var domainStringPrefixes = []string{
+	// iam: Account/Project/User/ServiceAccount/Group/Role/AccessBinding/Operation/UserOAuthClient
+	"acc", "prj", "usr", "sva", "grp", "rol", "acb", "iop", "uoc",
+	// legacy shared vpc prefix
+	"e9b",
+}
+
+// allKnownPrefixValues — ЕДИНСТВЕННЫЙ источник истины: значения всех объявленных
+// prefix-констант ids (дубли по значению — b1g/epd/fd8/nlb/enp — представлены
+// один раз) плюс domainStringPrefixes. knownPrefixes и KnownPrefixes() строятся
+// отсюда; guard-тест (ids_test) сверяет, что каждая Prefix*-константа входит в
+// набор, — это ловит drift без ручной синхронизации отдельной map'ы.
+func allKnownPrefixValues() []string {
+	vals := []string{
+		PrefixCloud, PrefixOrganization, PrefixNetwork, PrefixSubnet, PrefixAddress,
+		PrefixRouteTable, PrefixSecurityGroup, PrefixGateway, PrefixNetworkInterface,
+		PrefixAddressPool, PrefixAnycastPool, PrefixInstance, PrefixImage,
+		PrefixLoadBalancer, PrefixListener, PrefixTargetGroup, PrefixGlobalLoadBalancer,
+		PrefixApplication, PrefixRegistry,
+		PrefixOperationVPC, PrefixOperationApps, PrefixOperationReg,
+	}
+	return append(vals, domainStringPrefixes...)
+}
+
+// knownPrefixes — множество всех известных 3-символьных префиксов проекта,
+// выведенное из allKnownPrefixValues(). Источник истины для HasKnownPrefix.
+var knownPrefixes = func() map[string]struct{} {
+	m := make(map[string]struct{})
+	for _, p := range allKnownPrefixValues() {
+		m[p] = struct{}{}
+	}
+	return m
+}()
+
+// KnownPrefixes возвращает КОПИЮ множества известных префиксов — потребители
+// (напр. validate.baseResourceIDPrefixes) строят свой набор поверх этого, не
+// дублируя список литералов и не рискуя drift'ом с HasKnownPrefix.
+func KnownPrefixes() map[string]struct{} {
+	m := make(map[string]struct{}, len(knownPrefixes))
+	for p := range knownPrefixes {
+		m[p] = struct{}{}
+	}
+	return m
 }
 
 // HasKnownPrefix проверяет, что id имеет валидную форму ресурс-id: ровно

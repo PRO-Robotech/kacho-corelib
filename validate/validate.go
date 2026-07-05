@@ -29,6 +29,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	coreerrors "github.com/PRO-Robotech/kacho-corelib/errors"
+	"github.com/PRO-Robotech/kacho-corelib/ids"
 )
 
 // nameRe — строгий regex имени для strict-policy ресурсов (Folder, Cloud).
@@ -345,30 +346,12 @@ func UpdateMask(field string, mask []string, known map[string]struct{}) error {
 const EnvExtraResourceIDPrefixes = "KACHO_EXTRA_RESOURCE_ID_PREFIXES"
 
 // baseResourceIDPrefixes — известные 3-символьные prefix'ы resource-id'ов Kachō,
-// захардкоженные в corelib (стабильное ядро). Расширяется через
-// EnvExtraResourceIDPrefixes без правки этого файла.
-var baseResourceIDPrefixes = map[string]struct{}{
-	// vpc (per-ресурс)
-	"net": {}, "sub": {}, "adr": {}, "rtb": {}, "sgr": {}, "gtw": {}, "nic": {}, "apl": {}, "aap": {},
-	// vpc op-root + legacy общие vpc-префиксы (backward-compat)
-	"enp": {}, "e9b": {},
-	// iam: Account/Project/User/ServiceAccount/Group/Role/AccessBinding + Operation
-	// + UserOAuthClient (uoc — персональный access-токен User'а, id `uoc_<…>` в
-	// REST-пути DELETE /iam/v1/users/{userId}/tokens/{tokenId}).
-	"acc": {}, "prj": {}, "usr": {}, "sva": {}, "grp": {}, "rol": {}, "acb": {}, "iop": {}, "uoc": {},
-	// nlb: LoadBalancer/Listener/TargetGroup/GlobalLoadBalancer
-	"nlb": {}, "lst": {}, "tgr": {}, "glb": {},
-	// apps (PaaS): Application=app (resource) + aop (apps op-root). Без них
-	// well-formed app-id отдавал бы InvalidArgument на authz-edge вместо
-	// роутинга к kacho-apps.
-	"app": {}, "aop": {},
-	// registry: Registry=reg (resource) + rop (registry op-root). Без них
-	// well-formed reg-id отдавал бы InvalidArgument на authz-edge вместо
-	// роутинга к kacho-registry.
-	"reg": {}, "rop": {},
-	// compute + legacy resource-manager
-	"b1g": {}, "bpf": {}, "epd": {}, "fd8": {},
-}
+// стабильное ядро. ЕДИНЫЙ источник — ids.KnownPrefixes() (vpc/nlb/compute/apps/
+// registry/iam/legacy префиксы владеет ids), поэтому здесь НЕ дублируется список
+// литералов: раньше две независимые копии (ids.knownPrefixes и этот набор) уже
+// разошлись (reg/rop были только тут). Расширяется через EnvExtraResourceIDPrefixes
+// без правки кода.
+var baseResourceIDPrefixes = ids.KnownPrefixes()
 
 // parseResourceIDPrefixes нормализует comma-separated значение env в список
 // значимых prefix'ов: обрезает пробелы, приводит к нижнему регистру, отбрасывает

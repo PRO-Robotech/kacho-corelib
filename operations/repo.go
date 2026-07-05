@@ -518,12 +518,6 @@ func scanOperation(row interface {
 		return nil, err
 	}
 
-	op.Principal = Principal{
-		Type:        principalType,
-		ID:          principalID,
-		DisplayName: principalDisplay,
-	}
-
 	// восстанавливаем Metadata
 	if metaTypeStr != nil && metaData != nil {
 		op.Metadata = &anypb.Any{
@@ -601,14 +595,24 @@ func extractResourceID(metadata *anypb.Any) string {
 	if err != nil {
 		return ""
 	}
-	// Ищем поле с суффиксом _id в proto reflection
 	fields := msg.ProtoReflect().Descriptor().Fields()
+	// Приоритет — поле, названное РОВНО resource_id (явная конвенция owning-
+	// ресурса, как ByName в extractAccountID). Только при его отсутствии/пустоте
+	// применяется back-compat fallback «первое непустое *_id-поле» — иначе
+	// metadata, где owning resource_id объявлен НЕ первым (после project_id/
+	// user_id), мис-атрибутировал бы денорм-колонку resource_id на чужой id.
+	if fd := fields.ByName("resource_id"); fd != nil {
+		if val := msg.ProtoReflect().Get(fd); val.IsValid() && val.String() != "" {
+			return val.String()
+		}
+	}
+	// Fallback: первое непустое поле с суффиксом _id в proto reflection.
 	for i := 0; i < fields.Len(); i++ {
 		fd := fields.Get(i)
 		name := string(fd.Name())
 		if strings.HasSuffix(name, "_id") {
 			val := msg.ProtoReflect().Get(fd)
-			if val.IsValid() {
+			if val.IsValid() && val.String() != "" {
 				return val.String()
 			}
 		}
