@@ -75,18 +75,41 @@ func (c *Cache) Get(subjectID, relation, objectType, objectID string) (allowed b
 		return false, false
 	}
 	if c.now().After(e.expiresAt) {
-		// Lazy delete.
-		c.mu.Lock()
-		if subMap, ok := c.store[subjectID]; ok {
-			delete(subMap, entryKey{relation, objectType, objectID})
-			if len(subMap) == 0 {
-				delete(c.store, subjectID)
-			}
-		}
-		c.mu.Unlock()
+		// Lazy delete — guarded против clobber конкурентно записанного свежего
+		// entry (см. evictIfStale).
+		c.evictIfStale(subjectID, entryKey{relation, objectType, objectID}, e.expiresAt)
 		return false, false
 	}
 	return e.allowed, true
+}
+
+// evictIfStale удаляет entry (subjectID, key) под write lock, но ТОЛЬКО если
+// сохранённый expiresAt всё ещё равен observedExpiresAt — тому stale-значению,
+// которое Get наблюдал под RLock перед тем, как отпустить его.
+//
+// Зачем: между RUnlock и Lock в Get конкурентный SetAllowed мог записать свежий
+// entry (новый expiresAt в будущем). Безусловный delete выкинул бы этот валидный
+// positive-результат (потеря → лишний Check round-trip в kacho-iam). Сравнение
+// expiresAt гарантирует, что мы удаляем именно ту stale-запись, а не свежую.
+func (c *Cache) evictIfStale(subjectID string, key entryKey, observedExpiresAt time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	subMap, ok := c.store[subjectID]
+	if !ok {
+		return
+	}
+	cur, ok := subMap[key]
+	if !ok {
+		return
+	}
+	if !cur.expiresAt.Equal(observedExpiresAt) {
+		// Свежий entry записан конкурентно — не трогаем.
+		return
+	}
+	delete(subMap, key)
+	if len(subMap) == 0 {
+		delete(c.store, subjectID)
+	}
 }
 
 // SetAllowed — кеширует positive result (TTL).

@@ -4,6 +4,8 @@
 package authz_test
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -92,6 +94,68 @@ func TestCache_DefaultTTL(t *testing.T) {
 	_, ok := c.Get("user:usr_alice", "viewer", "vpc_network", "enp_a")
 	if !ok {
 		t.Fatalf("expected hit (default TTL must be ≥4s)")
+	}
+}
+
+// TestCache_Concurrent — data-race guard: Get / SetAllowed / InvalidateBySubject
+// одновременно из N goroutine на пересекающихся ключах. Прогоняется под -race;
+// падает, если какой-либо путь доступа к store не защищён локом. Ключевой момент —
+// lazy-eviction в Get (evictIfStale) конкурирует с SetAllowed на тех же ключах.
+func TestCache_Concurrent(t *testing.T) {
+	c := authz.NewCache(1 * time.Millisecond) // короткий TTL → частая lazy-eviction
+	const goroutines = 32
+	const iterations = 500
+	subjects := []string{"user:usr_a", "user:usr_b", "user:usr_c"}
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				subj := subjects[(g+i)%len(subjects)]
+				obj := fmt.Sprintf("enp_%d", i%8)
+				switch i % 4 {
+				case 0:
+					c.SetAllowed(subj, "viewer", "vpc_network", obj)
+				case 1:
+					c.Get(subj, "viewer", "vpc_network", obj)
+				case 2:
+					c.Get(subj, "viewer", "vpc_network", obj)
+				case 3:
+					c.InvalidateBySubject(subj)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	// Sanity: кэш всё ещё работоспособен после конкурентной нагрузки.
+	c.SetAllowed("user:usr_final", "viewer", "vpc_network", "enp_final")
+	if _, ok := c.Get("user:usr_final", "viewer", "vpc_network", "enp_final"); !ok {
+		t.Fatalf("cache unusable after concurrent load")
+	}
+}
+
+// TestCache_LazyEvictionKeepsFreshEntry — публичный сценарий guard'а из
+// evictIfStale: после того как Get увидел просроченную запись, конкурентная
+// перезапись свежим SetAllowed не должна быть выкинута последующей lazy-eviction.
+func TestCache_LazyEvictionKeepsFreshEntry(t *testing.T) {
+	base := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	now := base
+	c := authz.NewCache(5 * time.Second)
+	c.SetNowFunc(func() time.Time { return now })
+
+	c.SetAllowed("user:usr_alice", "viewer", "vpc_network", "enp_x") // expiry base+5s
+
+	// Продвигаем время за TTL — запись просрочена.
+	now = base.Add(6 * time.Second)
+	// Свежая перезапись (expiry now+5s) — эмулирует конкурентный писатель.
+	c.SetAllowed("user:usr_alice", "viewer", "vpc_network", "enp_x")
+
+	// Get не должен уронить свежую запись (её expiresAt в будущем относительно now).
+	if _, ok := c.Get("user:usr_alice", "viewer", "vpc_network", "enp_x"); !ok {
+		t.Fatalf("fresh entry evicted after re-set past TTL")
 	}
 }
 
