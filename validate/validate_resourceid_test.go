@@ -44,6 +44,7 @@ var allIDPrefixes = func() map[string]string {
 		"PrefixGateway":            ids.PrefixGateway,
 		"PrefixNetworkInterface":   ids.PrefixNetworkInterface,
 		"PrefixAddressPool":        ids.PrefixAddressPool,
+		"PrefixAnycastPool":        ids.PrefixAnycastPool,
 		"PrefixInstance":           ids.PrefixInstance,
 		"PrefixDisk":               ids.PrefixDisk,
 		"PrefixImage":              ids.PrefixImage,
@@ -58,14 +59,15 @@ var allIDPrefixes = func() map[string]string {
 		"PrefixOperationCompute": ids.PrefixOperationCompute,
 		"PrefixOperationNLB":     ids.PrefixOperationNLB,
 		// IAM domain constants (mirrored literals)
-		"iam.PrefixAccount":        "acc",
-		"iam.PrefixProject":        "prj",
-		"iam.PrefixUser":           "usr",
-		"iam.PrefixServiceAccount": "sva",
-		"iam.PrefixGroup":          "grp",
-		"iam.PrefixRole":           "rol",
-		"iam.PrefixAccessBinding":  "acb",
-		"iam.PrefixOperationIAM":   "iop",
+		"iam.PrefixAccount":         "acc",
+		"iam.PrefixProject":         "prj",
+		"iam.PrefixUser":            "usr",
+		"iam.PrefixServiceAccount":  "sva",
+		"iam.PrefixGroup":           "grp",
+		"iam.PrefixRole":            "rol",
+		"iam.PrefixAccessBinding":   "acb",
+		"iam.PrefixOperationIAM":    "iop",
+		"iam.PrefixUserOAuthClient": "uoc",
 	}
 	return m
 }()
@@ -106,6 +108,7 @@ func TestResourceID_KnownPrefixesAcceptValid(t *testing.T) {
 		{"role", "rol"},
 		{"access binding", "acb"},
 		{"iam operation", "iop"},
+		{"user oauth client", "uoc"},
 		// nlb
 		{"load balancer", "nlb"},
 		{"listener", "lst"},

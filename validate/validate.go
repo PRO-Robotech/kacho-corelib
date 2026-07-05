@@ -333,17 +333,23 @@ func UpdateMask(field string, mask []string, known map[string]struct{}) error {
 // корректные id переходного периода.
 var resourceIDPrefixes = map[string]struct{}{
 	// vpc (per-ресурс)
-	"net": {}, "sub": {}, "adr": {}, "rtb": {}, "sgr": {}, "gtw": {}, "nic": {}, "apl": {},
+	"net": {}, "sub": {}, "adr": {}, "rtb": {}, "sgr": {}, "gtw": {}, "nic": {}, "apl": {}, "aap": {},
 	// vpc op-root + legacy общие vpc-префиксы (backward-compat)
 	"enp": {}, "e9b": {},
 	// iam: Account/Project/User/ServiceAccount/Group/Role/AccessBinding + Operation
-	"acc": {}, "prj": {}, "usr": {}, "sva": {}, "grp": {}, "rol": {}, "acb": {}, "iop": {},
+	// + UserOAuthClient (uoc — персональный access-токен User'а, id `uoc_<…>` в
+	// REST-пути DELETE /iam/v1/users/{userId}/tokens/{tokenId}).
+	"acc": {}, "prj": {}, "usr": {}, "sva": {}, "grp": {}, "rol": {}, "acb": {}, "iop": {}, "uoc": {},
 	// nlb: LoadBalancer/Listener/TargetGroup/GlobalLoadBalancer
 	"nlb": {}, "lst": {}, "tgr": {}, "glb": {},
 	// apps (PaaS): Application=app (resource) + aop (apps op-root). Без них
 	// well-formed app-id отдавал бы InvalidArgument на authz-edge вместо
 	// роутинга к kacho-apps.
 	"app": {}, "aop": {},
+	// registry: Registry=reg (resource) + rop (registry op-root). Без них
+	// well-formed reg-id отдавал бы InvalidArgument на authz-edge вместо
+	// роутинга к kacho-registry.
+	"reg": {}, "rop": {},
 	// compute + legacy resource-manager
 	"b1g": {}, "bpf": {}, "epd": {}, "fd8": {},
 }

@@ -57,6 +57,11 @@ const (
 	PrefixNetworkInterface = "nic"
 	PrefixAddressPool      = "apl"
 
+	// AnycastAddressPool — tenant-facing пул anycast-VIP, привязываемый к Network
+	// (M:N); собственный resource-prefix, чтобы id-парсеры отличали его от обычного
+	// AddressPool (`apl`).
+	PrefixAnycastPool = "aap"
+
 	// compute: Instance/Disk делят `epd`, Image/Snapshot делят `fd8` (зеркалит
 	// VPC-группировку); все compute-операции получают `epd` (== PrefixInstance),
 	// чтобы api-gateway opsproxy мог одним правилом маршрутизировать Operation.Get.
@@ -82,6 +87,14 @@ const (
 	// (декаплен от ресурса, как enp/epd) — api-gateway opsproxy маршрутизирует
 	// Operation.Get по первым 3 символам.
 	PrefixApplication = "app"
+
+	// registry: Registry (namespace OCI-реестра поверх zot) получает `reg` как
+	// resource-prefix; registry-домен Operation — отдельный стабильный op-prefix
+	// `rop` (декаплен от ресурса), по которому api-gateway opsproxy маршрутизирует
+	// Operation.Get к kacho-registry. Repository/Tag — read-only проекция из zot,
+	// собственного id-prefix не имеют (адресуются именем внутри namespace).
+	PrefixRegistry     = "reg"
+	PrefixOperationReg = "rop"
 
 	// Operation prefix per service-domain — отдельный, стабильный per-домен
 	// prefix, по которому gateway opsproxy маршрутизирует Operation.Get.
@@ -190,6 +203,7 @@ var knownPrefixes = map[string]struct{}{
 	PrefixGateway:            {}, // gtw
 	PrefixNetworkInterface:   {}, // nic
 	PrefixAddressPool:        {}, // apl
+	PrefixAnycastPool:        {}, // aap
 	PrefixInstance:           {}, // epd (= Disk, OperationCompute)
 	PrefixImage:              {}, // fd8 (= Snapshot)
 	PrefixLoadBalancer:       {}, // nlb (= OperationNLB)
