@@ -121,7 +121,10 @@ type Reconciler struct {
 
 	// firstSeenAbsent tracks when each orphan candidate was first observed absent
 	// (the GraceWindow tombstone). Reset when the resource reappears or becomes
-	// intended-registered. Guarded by mu (GCOrphans may run concurrently).
+	// intended-registered, and pruned at the end of each GCOrphans pass to the
+	// current registered-tuple set (so an id that leaves ListRegistered by any
+	// other path cannot leak an entry for process lifetime). Guarded by mu
+	// (GCOrphans may run concurrently).
 	mu              sync.Mutex
 	firstSeenAbsent map[string]time.Time
 }
@@ -238,9 +241,14 @@ func (r *Reconciler) GCOrphans(ctx context.Context) (int, error) {
 
 	emitted := 0
 	live := map[string]struct{}{}
+	candidates := make(map[string]struct{}, len(tuples))
 	for _, tup := range tuples {
+		candidates[tup.ID] = struct{}{}
 		exists, err := r.ad.Enumerator.ResourceExists(ctx, tup.Kind, tup.ID)
 		if err != nil {
+			// Bound the tombstone map even on an early error return: prune what we
+			// have observed as the candidate set so a partial pass cannot leak.
+			r.pruneTombstones(candidates)
 			return emitted, fmt.Errorf("reconciler.GCOrphans exists %s: %w", tup.ID, err)
 		}
 		if exists {
@@ -250,13 +258,34 @@ func (r *Reconciler) GCOrphans(ctx context.Context) (int, error) {
 		}
 		ok, err := r.gcOne(ctx, tup)
 		if err != nil {
+			r.pruneTombstones(candidates)
 			return emitted, err
 		}
 		if ok {
 			emitted++
 		}
 	}
+	// Bound firstSeenAbsent to the current candidate set: any tombstone whose id
+	// left ListRegistered by a path other than corelib GC (e.g. an out-of-band
+	// unregister) is dropped here, so the map can never leak entries for lifetime
+	// of the process (CWE-401). Grace is defense-in-depth only — correctness of the
+	// anti-race is DB-enforced (pg_advisory_xact_lock + intendedRegistered), so a
+	// pruned/reset grace clock (also on restart) never causes an incorrect GC.
+	r.pruneTombstones(candidates)
 	return emitted, nil
+}
+
+// pruneTombstones drops every firstSeenAbsent entry whose id is not in the given
+// candidate set (the ids observed in this GCOrphans pass), bounding the map to the
+// current registered-tuple set.
+func (r *Reconciler) pruneTombstones(candidates map[string]struct{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id := range r.firstSeenAbsent {
+		if _, ok := candidates[id]; !ok {
+			delete(r.firstSeenAbsent, id)
+		}
+	}
 }
 
 // gcOne attempts to unregister one orphan candidate under the anti-race
