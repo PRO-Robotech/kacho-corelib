@@ -159,6 +159,51 @@ func TestCache_LazyEvictionKeepsFreshEntry(t *testing.T) {
 	}
 }
 
+// TestCache_MaxEntriesBound — CWE-770: под enumeration-нагрузкой (много distinct
+// object-id в пределах TTL) число entry не должно расти безгранично. При потолке
+// insert нового ключа обязан удержать общий размер ≤ maxEntries.
+func TestCache_MaxEntriesBound(t *testing.T) {
+	const limit = 100
+	c := authz.NewCacheWithLimit(5*time.Second, limit)
+	// Вставляем на порядок больше distinct entry, чем потолок, в пределах TTL
+	// (время не двигаем → ничего не просрочено; спасает только hard-cap эвикция).
+	for i := 0; i < limit*20; i++ {
+		c.SetAllowed("user:usr_alice", "viewer", "vpc_network", fmt.Sprintf("enp_%d", i))
+	}
+	_, entries := c.Size()
+	if entries > limit {
+		t.Fatalf("cache exceeded max entries: got %d, want <= %d", entries, limit)
+	}
+}
+
+// TestCache_MaxEntriesEvictsExpiredFirst — при достижении потолка сперва вычищаются
+// просроченные записи; если их достаточно, свежие сохраняются без произвольной
+// эвикции.
+func TestCache_MaxEntriesEvictsExpiredFirst(t *testing.T) {
+	const limit = 10
+	base := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	now := base
+	c := authz.NewCacheWithLimit(5*time.Second, limit)
+	c.SetNowFunc(func() time.Time { return now })
+
+	// Заполняем ровно до потолка.
+	for i := 0; i < limit; i++ {
+		c.SetAllowed("user:usr_stale", "viewer", "vpc_network", fmt.Sprintf("old_%d", i))
+	}
+	// Просрочиваем всё.
+	now = base.Add(6 * time.Second)
+	// Новый insert → потолок достигнут, но все старые просрочены → чистятся.
+	c.SetAllowed("user:usr_fresh", "viewer", "vpc_network", "new_0")
+
+	_, entries := c.Size()
+	if entries > limit {
+		t.Fatalf("cache exceeded max entries after expiry sweep: got %d, want <= %d", entries, limit)
+	}
+	if _, ok := c.Get("user:usr_fresh", "viewer", "vpc_network", "new_0"); !ok {
+		t.Fatalf("fresh entry must survive; expired entries should have been reclaimed first")
+	}
+}
+
 func TestCache_DifferentRelationsIsolated(t *testing.T) {
 	c := authz.NewCache(5 * time.Second)
 	c.SetAllowed("user:usr_alice", "viewer", "vpc_network", "enp_a")
