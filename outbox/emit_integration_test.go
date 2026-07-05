@@ -5,7 +5,7 @@ package outbox_test
 
 // Integration-тест (testcontainers Postgres) для outbox.Emit — единственного
 // exported writer'а транзакционного outbox-паттерна. До этого теста пакет покрывал
-// только приватный sanitizeTable (emit_internal_test.go), а drainer-тесты пишут
+// только SanitizeTable (emit_internal_test.go), а drainer-тесты пишут
 // строки сырым INSERT'ом (insertOutboxRow), НИКОГДА не вызывая Emit — то есть сам
 // контракт Emit (атомарность с ресурсной DML + pg_notify-trigger + column-set)
 // оставался непроверенным (findings6 TEST #1, project-rule #12).

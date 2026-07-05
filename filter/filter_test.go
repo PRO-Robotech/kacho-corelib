@@ -49,6 +49,32 @@ func TestParse_NoQuote(t *testing.T) {
 	}
 }
 
+func TestParse_UnterminatedQuote(t *testing.T) {
+	// Value opens a quote but never closes it → the scanner runs off the end.
+	// Must reject with "Expected closing quote", not parse into a FilterAST.
+	// Regression guard for the filter/filter.go closing-quote reject branch.
+	ast, err := Parse(`name = "foo`, []string{"name"})
+	if ast != nil {
+		t.Fatalf("expected nil AST for unterminated quote, got %+v", ast)
+	}
+	if err == nil || !strings.Contains(err.Error(), "Expected closing quote") {
+		t.Fatalf("expected Expected closing quote, got %v", err)
+	}
+}
+
+func TestParse_TrailingGarbage(t *testing.T) {
+	// A well-formed equals followed by trailing tokens after the closing quote
+	// must reject with "Unexpected token" (no AND/OR support yet), never silently
+	// accept the leading clause. Regression guard for the trailing-token reject.
+	ast, err := Parse(`name = "foo" extra`, []string{"name"})
+	if ast != nil {
+		t.Fatalf("expected nil AST for trailing garbage, got %+v", ast)
+	}
+	if err == nil || !strings.Contains(err.Error(), "Unexpected token") {
+		t.Fatalf("expected Unexpected token, got %v", err)
+	}
+}
+
 func TestParse_SpacedEquals(t *testing.T) {
 	ast, err := Parse(`name = "x"`, []string{"name"})
 	if err != nil {
