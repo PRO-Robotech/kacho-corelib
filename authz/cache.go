@@ -46,9 +46,12 @@ type entryKey struct {
 	objectID   string
 }
 
-// entry — кешируемое значение.
+// entry — кешируемое значение. Кешируются только positive-результаты (negative
+// не кешируется, см. package-doc), поэтому «разрешено» — структурный инвариант:
+// сам факт живой entry означает allowed=true. Отдельного allowed-поля нет —
+// иначе SetDenied-путь мог бы записать allowed=false и молча вернуть negative-
+// кеширование, запрещённое контрактом пакета.
 type entry struct {
-	allowed   bool      // всегда true (negative не кешируется); поле для future
 	expiresAt time.Time // unix-time истечения
 }
 
@@ -107,7 +110,8 @@ func (c *Cache) Get(subjectID, relation, objectType, objectID string) (allowed b
 		c.evictIfStale(subjectID, entryKey{relation, objectType, objectID}, e.expiresAt)
 		return false, false
 	}
-	return e.allowed, true
+	// Живая entry ⇒ positive-результат (negative не кешируется).
+	return true, true
 }
 
 // evictIfStale удаляет entry (subjectID, key) под write lock, но ТОЛЬКО если
@@ -196,7 +200,7 @@ func (c *Cache) SetAllowed(subjectID, relation, objectType, objectID string) {
 	// перезапись существующего размер не меняет).
 	if sm, ok := c.store[subjectID]; ok {
 		if _, keyExists := sm[key]; keyExists {
-			sm[key] = entry{allowed: true, expiresAt: c.now().Add(c.ttl)}
+			sm[key] = entry{expiresAt: c.now().Add(c.ttl)}
 			return
 		}
 	}
@@ -209,10 +213,7 @@ func (c *Cache) SetAllowed(subjectID, relation, objectType, objectID string) {
 		subMap = make(map[entryKey]entry, 8)
 		c.store[subjectID] = subMap
 	}
-	subMap[key] = entry{
-		allowed:   true,
-		expiresAt: c.now().Add(c.ttl),
-	}
+	subMap[key] = entry{expiresAt: c.now().Add(c.ttl)}
 	c.count++
 }
 

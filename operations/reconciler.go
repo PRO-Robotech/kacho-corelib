@@ -80,6 +80,14 @@ type ReconcilerConfig struct {
 	// неограниченное время — блокируя VACUUM и удерживая коннект. Потолок гарантирует
 	// прогресс sweep'а. Дефолт 10s; ≤0 → default.
 	ResolveTimeout time.Duration
+	// SweepBudget — жёсткий потолок СУММАРНОЙ длительности claim-транзакции одного
+	// Sweep'а. ResolveTimeout ограничивает лишь ОДИН резолв; без агрегатного потолка
+	// claim-tx могла бы жить до BatchSize×ResolveTimeout (~1000s при outage), удерживая
+	// пул-коннект, FOR UPDATE row-locks и xmin-горизонт operations-таблицы против
+	// VACUUM на всё окно (findings6 DATA #4). При исчерпании бюджета Sweep коммитит
+	// уже разрешённое и выходит; неразрешённые orphan'ы остаются durable (done=false)
+	// и добираются следующим Sweep'ом. Дефолт 30s; ≤0 → default.
+	SweepBudget time.Duration
 }
 
 func (c ReconcilerConfig) withDefaults() ReconcilerConfig {
@@ -94,6 +102,9 @@ func (c ReconcilerConfig) withDefaults() ReconcilerConfig {
 	}
 	if c.ResolveTimeout <= 0 {
 		c.ResolveTimeout = 10 * time.Second
+	}
+	if c.SweepBudget <= 0 {
+		c.SweepBudget = 30 * time.Second
 	}
 	return c
 }
@@ -134,6 +145,7 @@ type Reconciler struct {
 	batch          int
 	interval       time.Duration
 	resolveTimeout time.Duration
+	sweepBudget    time.Duration
 }
 
 // NewReconciler конструирует Reconciler. pool/resolver обязательны.
@@ -149,6 +161,7 @@ func NewReconciler(pool *pgxpool.Pool, resolver Resolver, cfg ReconcilerConfig, 
 		batch:          cfg.BatchSize,
 		interval:       cfg.Interval,
 		resolveTimeout: cfg.ResolveTimeout,
+		sweepBudget:    cfg.SweepBudget,
 	}
 	for _, o := range opts {
 		o(rc)
@@ -202,7 +215,18 @@ func (rc *Reconciler) Sweep(ctx context.Context) (int, error) {
 	}
 
 	resolved := 0
+	// Агрегатный потолок длительности claim-tx: как только суммарное время резолва
+	// пачки превышает SweepBudget, обрываем батч и коммитим уже разрешённое. Проверка
+	// в начале итерации — не начинаем новый резолв (до ResolveTimeout каждый), если
+	// бюджет уже исчерпан. Неразрешённые orphan'ы durable (done=false) → следующий
+	// Sweep (findings6 DATA #4: не держим claim-tx до BatchSize×ResolveTimeout).
+	sweepDeadline := time.Now().Add(rc.sweepBudget)
 	for i := range orphans {
+		if time.Now().After(sweepDeadline) {
+			rc.log.Warn("reconciler: sweep budget exhausted, committing partial batch",
+				"resolved", resolved, "claimed", len(orphans))
+			break
+		}
 		op := orphans[i]
 		res, rerr := rc.resolveOne(ctx, op)
 		if rerr != nil {

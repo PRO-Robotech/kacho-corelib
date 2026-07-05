@@ -52,7 +52,6 @@ var allIDPrefixes = func() map[string]string {
 		"PrefixLoadBalancer":       ids.PrefixLoadBalancer,
 		"PrefixListener":           ids.PrefixListener,
 		"PrefixTargetGroup":        ids.PrefixTargetGroup,
-		"PrefixGlobalLoadBalancer": ids.PrefixGlobalLoadBalancer,
 		// kacho-corelib/ids — per-domain operation prefixes
 		"PrefixOperationRM":      ids.PrefixOperationRM,
 		"PrefixOperationVPC":     ids.PrefixOperationVPC,
@@ -113,7 +112,6 @@ func TestResourceID_KnownPrefixesAcceptValid(t *testing.T) {
 		{"load balancer", "nlb"},
 		{"listener", "lst"},
 		{"target group", "tgr"},
-		{"global load balancer", "glb"},
 		// previously known (regression)
 		{"network", "net"},
 		{"subnet", "sub"},

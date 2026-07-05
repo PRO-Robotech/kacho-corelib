@@ -75,12 +75,10 @@ const (
 	// (== PrefixLoadBalancer), но resource-prefix у Listener/TargetGroup
 	// отдельный, чтобы id-парсеры могли отличать тип ресурса по prefix-у
 	// (в отличие от vpc, где Subnet/Address делят `e9b` — там тип
-	// определяется контекстом URL-path). GlobalLoadBalancer зарезервирован
-	// под будущий composition layer; сейчас не используется ни одним handler-ом.
-	PrefixLoadBalancer       = "nlb"
-	PrefixListener           = "lst"
-	PrefixTargetGroup        = "tgr"
-	PrefixGlobalLoadBalancer = "glb"
+	// определяется контекстом URL-path).
+	PrefixLoadBalancer = "nlb"
+	PrefixListener     = "lst"
+	PrefixTargetGroup  = "tgr"
 
 	// apps (PaaS): Application получает свой 3-char resource-prefix `app`;
 	// apps-домен Operation получает отдельный стабильный op-prefix `aop`
@@ -212,7 +210,7 @@ func allKnownPrefixValues() []string {
 		PrefixCloud, PrefixOrganization, PrefixNetwork, PrefixSubnet, PrefixAddress,
 		PrefixRouteTable, PrefixSecurityGroup, PrefixGateway, PrefixNetworkInterface,
 		PrefixAddressPool, PrefixAnycastPool, PrefixInstance, PrefixImage,
-		PrefixLoadBalancer, PrefixListener, PrefixTargetGroup, PrefixGlobalLoadBalancer,
+		PrefixLoadBalancer, PrefixListener, PrefixTargetGroup,
 		PrefixApplication, PrefixRegistry,
 		PrefixOperationVPC, PrefixOperationApps, PrefixOperationReg,
 	}

@@ -327,8 +327,7 @@ func UpdateMask(field string, mask []string, known map[string]struct{}) error {
 // `<prefix>_<…>` с underscore, не 3-char ids.NewID, и не на публичной
 // REST-поверхности под authz — здесь не нужны.)
 //
-// NLB: LoadBalancer=nlb (== PrefixOperationNLB), Listener=lst, TargetGroup=tgr,
-// GlobalLoadBalancer=glb.
+// NLB: LoadBalancer=nlb (== PrefixOperationNLB), Listener=lst, TargetGroup=tgr.
 //
 // Legacy/прочие домены: Cloud/Folder=b1g, Organization=bpf (оставлены для
 // legacy operation-id), Instance/Disk=epd, Image/Snapshot=fd8. Старые enp/e9b

@@ -566,6 +566,3 @@ func Active() int64 { return defaultRegistry.Active() }
 
 // Ready — pkg-level: живость dispatcher-loop default-registry.
 func Ready() bool { return defaultRegistry.Ready() }
-
-// ErrShutdownTimeout sentinel для caller'ов, отличающих "drain ok" vs "timeout".
-var ErrShutdownTimeout = errors.New("operations: workers did not finish before shutdown timeout")
