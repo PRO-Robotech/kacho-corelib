@@ -91,9 +91,10 @@ func startDrainer(
 	pool drainerPool,
 	cfg drainer.Config,
 	fa *fakeApplier,
+	opts ...drainer.Option[rawPayload],
 ) (context.CancelFunc, <-chan struct{}, <-chan error) {
 	t.Helper()
-	d, err := drainer.New[rawPayload](pool, cfg, rawDecoder, applierFromFake(fa), testLogger())
+	d, err := drainer.New[rawPayload](pool, cfg, rawDecoder, applierFromFake(fa), testLogger(), opts...)
 	require.NoError(t, err)
 
 	dCtx, cancel := context.WithCancel(ctx)
@@ -558,14 +559,13 @@ func TestW1_1_10_TwoDrainerInstances_HAExactlyOnce(t *testing.T) {
 			fmt.Sprintf(`{"user":"user:r%02d","relation":"viewer","object":"project:p"}`, i))
 	}
 
-	require.True(t, fa.waitForCalls(n, 5*time.Second),
-		"expected exactly %d applies across both drainers, got %d", n, fa.countCalls())
-
-	// Settle for any stragglers.
-	time.Sleep(500 * time.Millisecond)
-	assert.Equal(t, int64(n), int64(fa.countCalls()),
-		"exactly-once: %d unique rows must produce exactly %d applies across 2 drainers (NO duplicates)",
-		n, n)
+	// Reach n applies, then hold a quiescence window: a duplicate apply from the
+	// losing instance is caught the moment it lands, not missed by a fixed sleep.
+	final, ok := waitStableInt64(
+		func() int64 { return int64(fa.countCalls()) }, int64(n), 500*time.Millisecond, 5*time.Second)
+	require.Truef(t, ok,
+		"exactly-once: %d unique rows must reach and HOLD exactly %d applies across 2 drainers (NO duplicates); observed %d",
+		n, n, final)
 
 	// Verify per-payload applied exactly once.
 	calls := fa.snapshotCalls()
@@ -692,39 +692,42 @@ func TestW1_1_13_IdleDrainer_NoBusyLoop(t *testing.T) {
 	pool, _ := setupDrainerPG(t)
 	fa := newFakeApplier()
 
-	// PollFallback = 30s → during 5s observation, expect 0 poll-driven SELECTs.
+	// PollFallback = 30s → during 5s observation, expect 0 poll-driven claims.
 	cfg := testCfg()
 	cfg.PollFallback = 30 * time.Second
 
-	dCancel, done, _ := startDrainer(t, ctx, pool, cfg, fa)
+	// Deterministic, in-process claim counter (independent of async pg_stat lag):
+	// every claim query against the outbox table increments it.
+	var claims atomic.Int64
+	dCancel, done, _ := startDrainer(t, ctx, pool, cfg, fa,
+		drainer.WithClaimObserver[rawPayload](func() { claims.Add(1) }))
 	defer func() { dCancel(); <-done }()
 
-	// Sample SELECT count from pg_stat_user_tables before / after 5s idle.
-	var beforeSeqScan, beforeIdxScan int64
+	// Let startup catch-up settle (it issues a bounded number of claims to drain
+	// the — empty — backlog), then baseline the counter.
+	time.Sleep(500 * time.Millisecond)
+	baseline := claims.Load()
+
+	// PRIMARY (deterministic): across a 5s idle window with PollFallback=30s the
+	// drainer must issue ZERO additional claims. A reintroduced busy-poll would
+	// increment `claims` in-process immediately — no pg_stat propagation lag.
+	time.Sleep(5 * time.Second)
+	idleClaims := claims.Load() - baseline
+	assert.Equal(t, int64(0), idleClaims,
+		"idle drainer must issue 0 claims in a 5s window (PollFallback=30s); saw %d", idleClaims)
+
+	// SECONDARY (sanity, best-effort): pg_stat_user_tables scan delta should also
+	// be ~0. Kept only as a coarse cross-check; the assertion above is the sound
+	// guard (pg_stat counters flush asynchronously and can lag the window).
+	var seqScan, idxScan int64
 	err := pool.QueryRow(ctx, `
 		SELECT COALESCE(seq_scan, 0), COALESCE(idx_scan, 0)
 		  FROM pg_stat_user_tables
 		 WHERE schemaname = 'kacho_iam' AND relname = 'fga_outbox'
-	`).Scan(&beforeSeqScan, &beforeIdxScan)
+	`).Scan(&seqScan, &idxScan)
 	require.NoError(t, err)
+	t.Logf("pg_stat cross-check: seq_scan=%d idx_scan=%d (secondary)", seqScan, idxScan)
 
-	time.Sleep(5 * time.Second)
-
-	var afterSeqScan, afterIdxScan int64
-	err = pool.QueryRow(ctx, `
-		SELECT COALESCE(seq_scan, 0), COALESCE(idx_scan, 0)
-		  FROM pg_stat_user_tables
-		 WHERE schemaname = 'kacho_iam' AND relname = 'fga_outbox'
-	`).Scan(&afterSeqScan, &afterIdxScan)
-	require.NoError(t, err)
-
-	scanDelta := (afterSeqScan - beforeSeqScan) + (afterIdxScan - beforeIdxScan)
-	// Allow at most 5 scans across 5s (≤1 scan/s) — sanity check against
-	// busy-loop. Startup catch-up may legitimately do 1-2 scans; subsequent
-	// idle period with PollFallback=30s must add 0.
-	assert.LessOrEqual(t, scanDelta, int64(5),
-		"idle drainer must not busy-poll fga_outbox (saw %d scans in 5s; PollFallback=30s)",
-		scanDelta)
 	assert.Equal(t, 0, fa.countCalls(), "applier must not be called on idle empty queue")
 }
 
@@ -758,10 +761,13 @@ func TestW1_1_14_ReapplyAfterRestart_FilteredBySentAt(t *testing.T) {
 	dCancel2, done2, _ := startDrainer(t, ctx, pool, testCfg(), fa2)
 	defer func() { dCancel2(); <-done2 }()
 
-	// Idle for 2s; if drainer 2 ignores sent_at filter, applier would be called.
-	time.Sleep(2 * time.Second)
-
-	assert.Equal(t, 0, fa2.countCalls(),
+	// Hold a 2s quiescence window asserting drainer 2 issues ZERO applies: if it
+	// ignored the sent_at filter and re-applied, the count would leave 0 and the
+	// poll fails the instant it happens (fail-fast), rather than a single read
+	// after a fixed sleep that a late re-apply could slip past.
+	_, ok := waitStableInt64(
+		func() int64 { return int64(fa2.countCalls()) }, 0, 2*time.Second, 2*time.Second)
+	assert.True(t, ok,
 		"drainer 2 must not re-apply already-sent row (WHERE sent_at IS NULL must filter it out)")
 }
 

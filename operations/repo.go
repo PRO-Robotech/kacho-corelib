@@ -228,8 +228,10 @@ func (r *pgRepo) CreateWithPrincipal(ctx context.Context, op Operation, p Princi
 		return fmt.Errorf("repo.Create: marshal metadata: %w", err)
 	}
 
-	// Извлекаем resource_id из метаданных (денормализованный индекс для фильтрации).
-	resourceID := extractResourceID(op.Metadata)
+	// Денормализованный индекс resource_id: предпочитаем ЯВНО заданный
+	// op.ResourceID (use-case знает owning-ресурс точно); только если он пуст —
+	// reflection-fallback на первое `*_id`-поле метаданных.
+	resourceID := resolveResourceID(op)
 	// Извлекаем account_id по ТОЧНОМУ имени поля — additive
 	// денормализация для account-scoped IAM operation-listing. Метаданные без
 	// account_id (не-IAM / категория II) → "" → SQL NULL (back-compat).
@@ -564,6 +566,18 @@ func marshalAny(a *anypb.Any) (*string, []byte, error) {
 	}
 	t := a.GetTypeUrl()
 	return &t, a.GetValue(), nil
+}
+
+// resolveResourceID выбирает значение для денормализованной колонки resource_id:
+// явный op.ResourceID имеет приоритет (use-case знает owning-ресурс точно), и
+// только при пустом значении применяется reflection-fallback extractResourceID
+// (первое `*_id`-поле метаданных) — сохраняя back-compat для use-case'ов, ещё не
+// задающих ResourceID явно.
+func resolveResourceID(op Operation) string {
+	if op.ResourceID != "" {
+		return op.ResourceID
+	}
+	return extractResourceID(op.Metadata)
 }
 
 // extractResourceID пытается извлечь поле resource_id из метаданных операции.

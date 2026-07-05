@@ -16,6 +16,7 @@ package shutdown
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sync"
@@ -43,6 +44,18 @@ func WithHandlerTimeout(d time.Duration) Option {
 	return func(m *Manager) { m.handlerTimeout = d }
 }
 
+// WithLogger задает logger для наблюдаемости shutdown'а. Используется для
+// логирования ошибок best-effort cleanup'а на пути поздней регистрации
+// (OnExit после начала shutdown'а), где ошибка не может быть возвращена вызвавшему
+// и иначе была бы потеряна молча. nil → slog.Default().
+func WithLogger(l *slog.Logger) Option {
+	return func(m *Manager) {
+		if l != nil {
+			m.logger = l
+		}
+	}
+}
+
 // Manager собирает cleanup-handlers и выполняет их в LIFO при сигнале или Close().
 type Manager struct {
 	mu             sync.Mutex
@@ -54,6 +67,7 @@ type Manager struct {
 	err            error
 	cancel         context.CancelFunc
 	doneCtx        context.Context
+	logger         *slog.Logger
 }
 
 // New создает Manager и стартует goroutine-listener для SIGINT/SIGTERM.
@@ -67,6 +81,7 @@ func New(opts ...Option) *Manager {
 		closed:         make(chan struct{}),
 		cancel:         cancel,
 		doneCtx:        doneCtx,
+		logger:         slog.Default(),
 	}
 	for _, o := range opts {
 		o(m)
@@ -86,9 +101,16 @@ func (m *Manager) OnExit(handlers ...Handler) {
 	m.mu.Lock()
 	if m.closing {
 		timeout := m.handlerTimeout
+		logger := m.logger
 		m.mu.Unlock()
 		for _, h := range handlers {
-			_ = runBounded(h, timeout)
+			if err := runBounded(h, timeout); err != nil {
+				// Ошибку вернуть некому (Close уже завершился), но терять её молча
+				// нельзя — иначе неубранный ресурс на фазе shutdown'а невидим для
+				// пост-мортема. Логируем best-effort.
+				logger.Error("shutdown: late-registered handler failed",
+					slog.String("err", err.Error()))
+			}
 		}
 		return
 	}

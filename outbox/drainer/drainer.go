@@ -106,6 +106,14 @@ type Drainer[T any] struct {
 	// error / decode-fail). Used to drive the outbox_poisoned_total metric
 	// without coupling the drainer to the metrics package.
 	onPoison func()
+
+	// onClaim, if set, is invoked once each time a claim query is issued against
+	// the outbox table (every SELECT…FOR UPDATE SKIP LOCKED claim, including the
+	// terminal empty claim that ends a drain loop). Enables deterministic,
+	// in-process observation of claim frequency — e.g. a test can assert an idle
+	// drainer issues ZERO claims across an observation window (busy-poll guard)
+	// without depending on asynchronous pg_stat counters.
+	onClaim func()
 }
 
 // Option customises a Drainer at construction (functional-options pattern).
@@ -118,6 +126,17 @@ func WithPoisonObserver[T any](fn func()) Option[T] {
 	return func(d *Drainer[T]) {
 		if fn != nil {
 			d.onPoison = fn
+		}
+	}
+}
+
+// WithClaimObserver registers a callback invoked once per claim query issued
+// against the outbox table. Enables deterministic in-process observation of
+// claim frequency (busy-poll guard) independent of pg_stat lag. nil is ignored.
+func WithClaimObserver[T any](fn func()) Option[T] {
+	return func(d *Drainer[T]) {
+		if fn != nil {
+			d.onClaim = fn
 		}
 	}
 }

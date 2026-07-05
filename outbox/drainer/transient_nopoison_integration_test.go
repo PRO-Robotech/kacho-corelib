@@ -174,14 +174,13 @@ func Test_1_4_21_CASClaimExactlyOnce_Race(t *testing.T) {
 			fmt.Sprintf(`{"resource_id":"app-%03d"}`, i))
 	}
 
-	require.True(t, fa.waitForCalls(m, 15*time.Second),
-		"expected %d applies across %d replicas, got %d", m, replicas, fa.countCalls())
-
-	// Settle for stragglers, then assert NO double-apply.
-	time.Sleep(700 * time.Millisecond)
-	assert.Equal(t, int64(m), totalApplies.Load(),
-		"exactly-once: %d rows must produce exactly %d applies across %d replicas (no double-apply)",
-		m, m, replicas)
+	// Reach m applies, then hold a quiescence window: any (m+1)th apply from a
+	// losing replica is caught the instant it lands (fail-fast), not missed by a
+	// fixed settle-sleep.
+	final, ok := waitStableInt64(totalApplies.Load, int64(m), 700*time.Millisecond, 15*time.Second)
+	require.Truef(t, ok,
+		"exactly-once: %d rows must reach and HOLD exactly %d applies across %d replicas (no double-apply); observed %d",
+		m, m, replicas, final)
 
 	calls := fa.snapshotCalls()
 	seen := make(map[string]int, len(calls))

@@ -4,8 +4,11 @@
 package shutdown_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -85,4 +88,40 @@ func TestOnExitAfterClose_RunsImmediately(t *testing.T) {
 	var ran bool
 	m.OnExit(func() error { ran = true; return nil })
 	assert.True(t, ran, "поздно зарегистрированный handler выполняется сразу, а не теряется")
+}
+
+// OnExit после Close, когда handler вернул ошибку — ошибка НЕ теряется молча,
+// а логируется через сконфигурированный logger (наблюдаемость best-effort
+// cleanup на фазе завершения).
+func TestOnExitAfterClose_LogsHandlerError(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	m := shutdown.New(shutdown.WithLogger(logger))
+	require.NoError(t, m.Close())
+
+	boom := errors.New("late cleanup failed")
+	m.OnExit(func() error { return boom })
+
+	out := buf.String()
+	assert.Contains(t, out, "late cleanup failed",
+		"ошибка позднего handler'а должна быть залогирована, а не отброшена молча")
+}
+
+// Late-handler timeout также логируется (ErrHandlerTimeout), не теряется молча.
+func TestOnExitAfterClose_LogsHandlerTimeout(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	m := shutdown.New(
+		shutdown.WithLogger(logger),
+		shutdown.WithHandlerTimeout(50*time.Millisecond),
+	)
+	require.NoError(t, m.Close())
+
+	m.OnExit(func() error { <-make(chan struct{}); return nil }) // зависает навсегда
+
+	out := buf.String()
+	assert.True(t, strings.Contains(out, "timed out") || strings.Contains(out, "timeout"),
+		"timeout позднего handler'а должен быть залогирован; got: %q", out)
 }
