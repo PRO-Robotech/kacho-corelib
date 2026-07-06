@@ -35,12 +35,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/PRO-Robotech/kacho-corelib/outbox"
 )
 
 // Event-type literals on the register-outbox table.
@@ -48,16 +49,6 @@ const (
 	eventRegister   = "fga.register"
 	eventUnregister = "fga.unregister"
 )
-
-// sanitizeTable квотирует имя таблицы (опц. схема-квалифицированное
-// "schema.table") через pgx.Identifier — идентификатор экранируется библиотекой
-// независимо от дисциплины вызывающего. cfg.Table документирован как trusted
-// composition-root literal, но это defense-in-depth, идентичный outbox.Emit
-// (sanitizeTable) и operations.pgRepo.tableName: имя таблицы больше не может
-// стать вектором statement-injection при interpolation в `%s`.
-func sanitizeTable(table string) string {
-	return pgx.Identifier(strings.Split(table, ".")).Sanitize()
-}
 
 // ResourceRow is one live resource as seen by the per-service enumerator. Kind +
 // ID identify the resource; ProjectID is the hierarchy parent ("" when there is
@@ -174,7 +165,7 @@ func (r *Reconciler) RedrivePoisoned(ctx context.Context) (int, error) {
 		`UPDATE %s
 		    SET attempt_count = 0, last_error = NULL
 		  WHERE sent_at IS NULL AND attempt_count >= $1`,
-		sanitizeTable(r.cfg.Table),
+		outbox.SanitizeTable(r.cfg.Table),
 	)
 	tag, err := r.pool.Exec(ctx, q, r.cfg.MaxAttempts)
 	if err != nil {
@@ -410,7 +401,7 @@ func intendedRegistered(ctx context.Context, tx pgx.Tx, table, id string) (bool,
 		      WHERE resource_id = $1 AND event_type IN ($2, $3)
 		      ORDER BY id DESC LIMIT 1),
 		    '') = $2
-	`, sanitizeTable(table))
+	`, outbox.SanitizeTable(table))
 	var registered bool
 	if err := tx.QueryRow(ctx, q, id, eventRegister, eventUnregister).Scan(&registered); err != nil {
 		return false, fmt.Errorf("reconciler: intended-registered %s: %w", id, err)
@@ -424,7 +415,7 @@ func insertIntent(ctx context.Context, tx pgx.Tx, table, eventType, kind, id, pa
 	q := fmt.Sprintf(
 		`INSERT INTO %s (event_type, resource_kind, resource_id, payload)
 		 VALUES ($1, $2, $3, $4::jsonb)`,
-		sanitizeTable(table),
+		outbox.SanitizeTable(table),
 	)
 	if _, err := tx.Exec(ctx, q, eventType, kind, id, payload); err != nil {
 		return fmt.Errorf("reconciler: insert %s intent %s: %w", eventType, id, err)

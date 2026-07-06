@@ -27,20 +27,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-)
 
-// sanitizeTable квотирует имя таблицы (опц. схема-квалифицированное) через
-// pgx.Identifier перед interpolation в `FROM %s` — defense-in-depth против
-// statement-injection, независимо от того что Table контрактно trusted-literal.
-func sanitizeTable(table string) string {
-	return pgx.Identifier(strings.Split(table, ".")).Sanitize()
-}
+	"github.com/PRO-Robotech/kacho-corelib/outbox"
+)
 
 // Recorder is the metrics sink the outbox layer writes to. Implement it with a
 // Prometheus registry at the service composition root; corelib provides the
@@ -179,7 +172,7 @@ func (c *Collector) Scan(ctx context.Context) error {
 		    COALESCE(EXTRACT(EPOCH FROM (now() - min(created_at) FILTER (WHERE sent_at IS NULL))), 0) AS oldest_age,
 		    count(*) FILTER (WHERE sent_at IS NULL AND attempt_count >= $1)                      AS poisoned
 		FROM %s
-	`, sanitizeTable(c.cfg.Table))
+	`, outbox.SanitizeTable(c.cfg.Table))
 
 	var backlog, poisoned int64
 	var oldestAge float64

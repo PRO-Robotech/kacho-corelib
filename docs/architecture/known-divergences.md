@@ -256,3 +256,75 @@ ping < `MinTime=5s` сам спровоцировал бы `GOAWAY` и **инв�
 **Эволюция:** если появится тестовая фабрика с инъектируемым (но по-прежнему
 production-репрезентативным) keepalive-профилем, окно можно пропорционально сжать,
 сохранив соотношение client-ping < server-MinTime.
+
+## 11. `authz` interceptor — `ErrNoPath` passthrough опирается на sentinel-контракт concrete CheckClient
+
+**Рубрика:** security.md — «per-RPC Check энфорсится на КАЖДОМ запросе» / CWE-863.
+
+**Как есть:** когда `CheckClient.Check` возвращает `ErrNoPath` (FGA: нет пути к
+объекту), `authorize()` возвращает `DecisionNoPath`, и `Unary()`/`Stream()`
+запускают handler (interceptor.go — arm `case DecisionAllowed, DecisionNoPath`).
+Цель — не маскировать `NOT_FOUND` под `403` для ресурса, у которого нет
+hierarchy-tuple. Пинится тестами `TestInterceptor_NoPathPassthroughRunsHandler`,
+`TestInterceptorStream_NoPathAllowsHandler`, а `TestInterceptor_NoPathBoundary_
+GenericErrorStillDenies` держит границу: любой не-`ErrNoPath` Check-error остаётся
+fail-closed.
+
+**Почему это by-design, а не corelib-баг:** различить «строки нет в БД» (легитимный
+passthrough → handler отдаст `NOT_FOUND`) и «строка есть, но owner-tuple ещё не
+записан / отсутствует» (утечка при passthrough) может **только** конкретный
+CheckClient, который ходит в БД своего сервиса — corelib этого объекта не видит.
+Дизайн специально разнёс два sentinel'а: `ErrHideExistence` — «объект СУЩЕСТВУЕТ в
+БД сервиса, но caller не вправе видеть» → interceptor БЛОКИРУЕТ handler и отдаёт
+generic `NOT_FOUND` (existence-hiding, без утечки/мутации); `ErrNoPath` — «объекта,
+скорее всего, нет». Контракт (см. godoc `ErrHideExistence`/`ErrNoPath` и
+`CheckClient`): concrete-adapter обязан вернуть **`ErrHideExistence` для
+существующего** объекта и `ErrNoPath` лишь когда строки нет. При соблюдении этого
+контракта cross-tenant Delete/Update tenant'ом B по существующему ресурсу tenant'а
+A корректно блокируется через `ErrHideExistence` — passthrough недостижим.
+
+**Остаточный риск (кросс-репо, вне corelib):** окно fgaproxy-outbox lag (SEC-A/SEC-D,
+at-least-once) — ресурс уже в БД, owner-hierarchy-tuple ещё не записан. Если
+concrete CheckClient в сервисе (kacho-vpc/kacho-compute) вернёт `ErrNoPath` **без**
+предварительной проверки существования строки в своей БД, existing-but-lagged
+ресурс пройдёт passthrough. Заметим: own-creator `admin`-tuple пишется
+**синхронно** на Create (`CreatorTupleWriter.WriteCreatorTuple` ДО `tx.Commit()`) —
+lag касается только hierarchy-tuple для доступа других членов проекта, не самого
+создателя. Устранение = дисциплина каждого сервисного CheckClient: на «no path»
+сверять существование строки и возвращать `ErrHideExistence` для существующей.
+Corelib-only backstop невозможен без (а) знания mutating-vs-read на уровне
+`RPCEntry` (новое поле контракта, наполняется в per-service PermissionMap =
+кросс-репо), либо (б) схлопывания `ErrNoPath` в `ErrHideExistence`, что стёрло бы
+намеренное разделение двух sentinel'ов и rich-`NOT_FOUND` от handler'а на
+отсутствующем ресурсе. Оба — за пределами contract-safe corelib-прохода.
+
+**Эволюция:** ввести в `RPCEntry` флаг мутации (или derive из permission-catalog
+verb) и для мутаций трактовать `ErrNoPath` как deny/hide-existence на уровне
+interceptor'а — координированная кросс-репо правка (RPCMap каждого сервиса) вместе
+с аудитом того, что каждый CheckClient сверяет существование строки.
+
+## 12. `ids.NewID` — panic на сбое `crypto/rand` (без error-return)
+
+**Рубрика:** project-rule #11 / graceful-degradation — «транзиентный сбой = ошибка
+одного запроса, не падение процесса».
+
+**Как есть:** `ids.NewID(prefix string) string` (ids.go) не возвращает error и
+паникует, если `crypto/rand.Read` вернул ошибку. Вызывается на каждом ресурсном
+`Create` во всех сервисах (прод-путь).
+
+**Почему принято:** на linux/macOS `getrandom(2)`/`/dev/urandom` не блокируется и
+не отдаёт ошибку после инициализации пула энтропии; сбой `crypto/rand.Read` —
+признак фундаментально сломанной системы (seccomp-запрет getrandom, исчерпание FD),
+из которого один запрос всё равно не восстановится осмысленно. Signature без error
+держит вызывающий код тонким (id генерится инлайн в domain-конструкторах, а не
+через error-проброс на каждом поле). Паника задокументирована в godoc и в
+inline-комментарии.
+
+**Известный трейд-офф (задокументирован):** транзиентный (гипотетически
+восстановимый) сбой RNG уронит процесс сервиса вместо `UNAVAILABLE` на один Create.
+Считаем приемлемым: вероятность на целевых платформах ≈ отказ ядра.
+
+**Эволюция:** при реальной потребности — аддитивный sibling
+`NewIDErr(prefix) (string, error)` для вызывающих, предпочитающих маппить
+RNG-сбой в gRPC `UNAVAILABLE`; существующий `NewID` не меняется. Не вводим
+превентивно (нет потребителя → speculative generality, запрещённая LEAN-проходом).

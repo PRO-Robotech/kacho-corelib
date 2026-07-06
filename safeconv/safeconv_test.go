@@ -88,6 +88,12 @@ func TestIntToUint32(t *testing.T) {
 		{0, 0},
 		{1000, 1000},
 		{math.MaxInt32, math.MaxInt32},
+		// Upper-saturation branch (the reason this helper exists over bare
+		// uint32(v)): any int above math.MaxUint32 must clamp, never wrap.
+		// On a 64-bit platform int easily exceeds MaxUint32.
+		{math.MaxUint32, math.MaxUint32},     // boundary: exactly the max, no clamp
+		{math.MaxUint32 + 1, math.MaxUint32}, // one past max → clamp (bare uint32(v) would wrap to 0)
+		{math.MaxInt64, math.MaxUint32},      // far above → clamp
 	}
 	for _, c := range cases {
 		if got := IntToUint32(c.in); got != c.want {
