@@ -6,6 +6,8 @@ package authz
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -310,24 +312,57 @@ func TestListObjects_SkipCacheBypass(t *testing.T) {
 	}
 }
 
-// Concurrent calls are safe (race detector).
+// TestListObjects_Concurrent — data-race guard для listObjectsCache: одновременно
+// из N goroutine прогоняем put (cache-miss на МНОГО distinct subject/scope-ключей,
+// заставляя evictIfNeededLocked срабатывать при переполнении maxSize), read-hit
+// (тот же ключ), и invalidateBySubject / invalidateAll. Прогоняется под -race;
+// падает, если любой путь к store (в т.ч. LRU-eviction или two-level-delete) не
+// защищён локом. Раньше тест бил ТОЛЬКО read-hit по одному общему ключу и не
+// пересекал put/evict/invalidate — зеркалим более сильный authz.TestCache_Concurrent.
 func TestListObjects_Concurrent(t *testing.T) {
 	client := &fakeClient{
 		fn: func(_ context.Context, _ ListObjectsRequest) (ListObjectsResponse, error) {
 			return ListObjectsResponse{ResourceIDs: []string{"net-1"}}, nil
 		},
 	}
+	// MaxEntries:100 (newSvc) против сотен distinct ключей → eviction под нагрузкой.
 	svc := newSvc(t, client)
 
-	done := make(chan struct{}, 50)
-	for i := 0; i < 50; i++ {
-		go func() {
-			defer func() { done <- struct{}{} }()
-			_, _ = svc.ListAllowedIDs(context.Background(), "user:usr_alice", "vpc_network", "vpc.networks.read", ListAllowedIDsOptions{})
-		}()
+	const goroutines = 32
+	const iterations = 300
+	subjects := []string{"user:usr_a", "user:usr_b", "user:usr_c", "user:usr_d"}
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				subj := subjects[(g+i)%len(subjects)]
+				// Distinct ScopeHint → distinct cache key → put + рост store →
+				// evictIfNeededLocked при превышении maxSize.
+				scope := fmt.Sprintf("prj_%d", i%64)
+				switch i % 4 {
+				case 0, 1:
+					_, _ = svc.ListAllowedIDs(context.Background(), subj, "vpc_network", "vpc.networks.read",
+						ListAllowedIDsOptions{ScopeHint: scope})
+				case 2:
+					svc.InvalidateBySubject(subj)
+				case 3:
+					svc.InvalidateAll()
+				}
+			}
+		}(g)
 	}
-	for i := 0; i < 50; i++ {
-		<-done
+	wg.Wait()
+
+	// Sanity: кэш работоспособен после конкурентной нагрузки.
+	ids, err := svc.ListAllowedIDs(context.Background(), "user:usr_final", "vpc_network", "vpc.networks.read", ListAllowedIDsOptions{})
+	if err != nil {
+		t.Fatalf("cache unusable after concurrent load: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "net-1" {
+		t.Fatalf("ids = %v, want [net-1]", ids)
 	}
 }
 

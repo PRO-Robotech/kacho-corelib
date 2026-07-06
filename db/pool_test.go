@@ -11,6 +11,27 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
+// TestNewPool_ParseErrorDoesNotLeakDSN — CWE-532 boundary-guard: при
+// неразбираемом DSN текст возвращаемой NewPool ошибки НЕ должен содержать
+// inline-пароль. Сейчас это обеспечивает сам pgx v5: `pgxpool.ParseConfig`
+// редактирует пароль (`user:xxxxxx@`) в тексте ошибки для обеих форм DSN
+// (URL и keyword/value). Тест фиксирует инвариант на нашей границе — чтобы
+// апгрейд/свап pgx или будущая обёртка NewPool, вернувшая raw dsn, были пойманы
+// регрессией (composition-root логирует эту ошибку на старте).
+//
+// Пробел в host форсит сбой url.Parse ВНУТРИ pgx ParseConfig ДО любого сетевого
+// I/O — детерминированно, без Postgres.
+func TestNewPool_ParseErrorDoesNotLeakDSN(t *testing.T) {
+	const secret = "s3cr3t-passw0rd"
+	dsn := "postgres://user:" + secret + "@bad host:5432/db"
+
+	_, err := NewPool(context.Background(), dsn)
+
+	require.Error(t, err, "malformed DSN must fail at ParseConfig")
+	require.NotContains(t, err.Error(), secret,
+		"startup error must not echo the DSN password (CWE-532)")
+}
+
 func TestNewPool_PingsAndStatementTimeoutSet(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test (testcontainers); skipped with -short")

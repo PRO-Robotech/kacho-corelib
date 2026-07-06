@@ -106,7 +106,11 @@ func (d *Drainer[T]) listenOnce(ctx context.Context, wakeup chan<- struct{}) err
 			if ctx.Err() != nil {
 				return nil
 			}
-			return err
+			// Wrap the leaf error to preserve the call-site (like the sibling
+			// pool.Acquire / LISTEN paths above): listenLoop logs this to trigger
+			// reconnect, and a bare pgx/network error is indistinguishable from an
+			// Acquire/Exec failure when triaging reconnect churn from logs.
+			return fmt.Errorf("WaitForNotification: %w", err)
 		}
 		if notif == nil {
 			continue
