@@ -60,6 +60,31 @@ type Repo interface {
 	Cancel(ctx context.Context, id string) error
 }
 
+// executionClaimer — опциональный upgrade Repo, который Worker использует ПЕРЕД
+// исполнением fn: атомарно re-arm'ит liveness операции (modified_at=now) и
+// подтверждает, что строка ещё не терминальна.
+//
+// Зачем: пока задача ждёт в in-memory admission backlog worker'а, её строка НЕ
+// heartbeat'ится (modified_at залочен на create-time), поэтому под устойчивой
+// перегрузкой Reconciler может счесть ещё-живую queued-операцию orphan'ом и
+// перевести её в терминал ERROR. Безусловное исполнение fn тогда создало бы
+// phantom-ресурс при уже-ERROR-операции. ClaimForExecution закрывает это:
+//   - live=false → строку уже разрешил Reconciler/Cancel → worker пропускает fn;
+//   - live=true  → modified_at сдвинут на now, окно grace исполняющейся операции
+//     ограничено opTimeout (< OrphanGrace) → Reconciler её больше не мис-клеймит.
+//
+// Опционально (type-assertion в worker.execute): Repo без этого метода сохраняет
+// pre-r9b поведение. corelib-овый pgRepo реализует его.
+type executionClaimer interface {
+	// ClaimForExecution single-statement CAS'ом (UPDATE … WHERE id=$1 AND
+	// done=false) сдвигает modified_at на now и возвращает live=true, если строка
+	// ещё done=false; 0 rows → live=false (строка уже терминальна). Row-lock
+	// сериализует его с терминальной записью/claim'ом Reconciler'а.
+	ClaimForExecution(ctx context.Context, id string) (live bool, err error)
+}
+
+var _ executionClaimer = (*pgRepo)(nil)
+
 // ListFilter — параметры фильтрации/пагинации для List.
 type ListFilter struct {
 	ResourceID string // если непуст — фильтр по resource_id (денормализованное поле)
@@ -426,6 +451,21 @@ func (r *pgRepo) MarkDone(ctx context.Context, id string, response *anypb.Any) e
 // CAS-on-`done`, no-overwrite (markErrorCAS).
 func (r *pgRepo) MarkError(ctx context.Context, id string, errStatus *status.Status) error {
 	return markErrorCAS(ctx, r.pool, r.tableName(), id, errStatus)
+}
+
+// ClaimForExecution — pre-execution liveness re-arm + terminal-state guard.
+// Single-statement CAS: сдвигает modified_at=now, если строка ещё done=false,
+// и возвращает live по числу затронутых строк (1 → живая, 0 → уже терминальна).
+// Row-lock сериализует его с markDoneCAS/markErrorCAS и claim'ом Reconciler'а
+// (FOR UPDATE SKIP LOCKED), поэтому queued-операция, которую Reconciler уже
+// разрешил как orphan, вернёт live=false и worker пропустит fn (нет phantom'а).
+func (r *pgRepo) ClaimForExecution(ctx context.Context, id string) (bool, error) {
+	q := fmt.Sprintf(`UPDATE %s SET modified_at = $2 WHERE id = $1 AND done = false`, r.tableName())
+	tag, err := r.pool.Exec(ctx, q, id, time.Now().UTC())
+	if err != nil {
+		return false, fmt.Errorf("repo.ClaimForExecution: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // ErrAlreadyDone возвращается из терминальных переходов, если строка уже

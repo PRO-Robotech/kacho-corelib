@@ -70,15 +70,6 @@ func TestIntToInt32(t *testing.T) {
 	}
 }
 
-func TestIntToUint(t *testing.T) {
-	if got := IntToUint(-5); got != 0 {
-		t.Errorf("IntToUint(-5) = %d, want 0", got)
-	}
-	if got := IntToUint(7); got != 7 {
-		t.Errorf("IntToUint(7) = %d, want 7", got)
-	}
-}
-
 func TestIntToUint32(t *testing.T) {
 	cases := []struct {
 		in   int

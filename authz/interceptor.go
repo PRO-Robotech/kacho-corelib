@@ -112,36 +112,47 @@ func NewInterceptor(opts InterceptorOptions) *Interceptor {
 	}
 }
 
+// decisionError мапит Decision в gRPC-ошибку, которую interceptor возвращает
+// вместо вызова handler'а. Passthrough-решения (Allowed/Internal/NoPath — надо
+// вызвать handler) дают nil. ЕДИНЫЙ источник маппинга для Unary() и Stream():
+// новый Decision обрабатывается ровно в одном месте, иначе unary/stream-switch'и
+// расходятся вручную и streaming-RPC молча ломается на не-учтённом решении.
+func decisionError(dec Decision, err error) error {
+	switch dec {
+	case DecisionAllowed, DecisionInternal, DecisionNoPath:
+		// Passthrough: caller вызывает handler (Internal — internal RPC без Check).
+		return nil
+	case DecisionHideExistence:
+		// Existence-hiding: объект есть, но caller не вправе видеть → NOT_FOUND
+		// (handler НЕ вызывается, чтобы не слить ресурс).
+		return status.Error(codes.NotFound, "not found")
+	case DecisionDenied:
+		return status.Error(codes.PermissionDenied, "permission denied")
+	case DecisionUnavailable:
+		// Fail-closed.
+		return status.Error(codes.PermissionDenied, "authorization service unavailable")
+	case DecisionUnmapped:
+		// Fail-closed для не-mapped RPC.
+		return status.Error(codes.PermissionDenied, "permission denied (rpc not mapped)")
+	case DecisionRateLimited:
+		return status.Error(codes.ResourceExhausted, "too many denied checks; retry later")
+	default:
+		// Unknown decision — fail-closed.
+		if err != nil {
+			return status.Errorf(codes.PermissionDenied, "%v", err)
+		}
+		return status.Error(codes.PermissionDenied, "permission denied (unknown decision)")
+	}
+}
+
 // Unary возвращает grpc.UnaryServerInterceptor.
 func (i *Interceptor) Unary() grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		dec, err := i.authorize(ctx, info.FullMethod, req)
-		switch dec {
-		case DecisionAllowed, DecisionNoPath:
-			return handler(ctx, req)
-		case DecisionHideExistence:
-			// Existence-hiding: объект есть, но caller не вправе видеть → NOT_FOUND
-			// (handler НЕ вызывается, чтобы не слить ресурс).
-			return nil, status.Error(codes.NotFound, "not found")
-		case DecisionDenied:
-			return nil, status.Error(codes.PermissionDenied, "permission denied")
-		case DecisionUnavailable:
-			// Fail-closed.
-			return nil, status.Error(codes.PermissionDenied, "authorization service unavailable")
-		case DecisionUnmapped:
-			// Fail-closed для не-mapped RPC.
-			return nil, status.Error(codes.PermissionDenied, "permission denied (rpc not mapped)")
-		case DecisionInternal:
-			// internal RPC — пропустить без Check.
-			return handler(ctx, req)
-		case DecisionRateLimited:
-			return nil, status.Error(codes.ResourceExhausted, "too many denied checks; retry later")
+		if derr := decisionError(dec, err); derr != nil {
+			return nil, derr
 		}
-		// Unknown decision — fail-closed.
-		if err != nil {
-			return nil, status.Errorf(codes.PermissionDenied, "%v", err)
-		}
-		return nil, status.Error(codes.PermissionDenied, "permission denied (unknown decision)")
+		return handler(ctx, req)
 	}
 }
 
@@ -165,24 +176,10 @@ func (i *Interceptor) Stream() grpc.StreamServerInterceptor {
 		// (e.g. InternalResourceLifecycleService.Subscribe — Public=true), либо
 		// extractor явно проектирует request'-less проверку.
 		dec, err := i.authorize(ss.Context(), info.FullMethod, nil)
-		switch dec {
-		case DecisionAllowed, DecisionInternal, DecisionNoPath:
-			return handler(srv, ss)
-		case DecisionHideExistence:
-			return status.Error(codes.NotFound, "not found")
-		case DecisionDenied:
-			return status.Error(codes.PermissionDenied, "permission denied")
-		case DecisionUnavailable:
-			return status.Error(codes.PermissionDenied, "authorization service unavailable")
-		case DecisionUnmapped:
-			return status.Error(codes.PermissionDenied, "permission denied (rpc not mapped)")
-		case DecisionRateLimited:
-			return status.Error(codes.ResourceExhausted, "too many denied checks; retry later")
+		if derr := decisionError(dec, err); derr != nil {
+			return derr
 		}
-		if err != nil {
-			return status.Errorf(codes.PermissionDenied, "%v", err)
-		}
-		return status.Error(codes.PermissionDenied, "permission denied (unknown decision)")
+		return handler(srv, ss)
 	}
 }
 
