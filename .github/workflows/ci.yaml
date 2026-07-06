@@ -19,7 +19,7 @@ defaults:
 
 jobs:
   build-vet-test:
-    name: build + vet + test (unit)
+    name: build + vet + test (unit, -short)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -29,7 +29,24 @@ jobs:
       - run: go mod download
       - run: go build ./...
       - run: go vet ./...
+      # Быстрый feedback-цикл: юнит-тесты, testcontainer-интеграция под -short пропущена.
       - run: go test -race -short -count=1 -timeout 5m ./...
+
+  integration:
+    name: integration + concurrency (testcontainers, no -short)
+    runs-on: ubuntu-latest
+    # ubuntu-latest несёт готовый Docker daemon → testcontainers Postgres поднимается на раннере.
+    # SKIP_INTEGRATION НАМЕРЕННО не выставлен, -short НЕ передан — иначе весь integration/exactly-once
+    # слой (operations CAS, reconciler two-replica SKIP-LOCKED, outbox two-insert/HA/CAS-claim, emit
+    # dual-write) молча скипается и merge-gate зеленеет при выброшенном CAS-предикате.
+    steps:
+      - uses: actions/checkout@v6
+        with: { path: kacho-corelib }
+      - uses: actions/setup-go@v6
+        with: { go-version-file: kacho-corelib/go.mod, cache-dependency-path: kacho-corelib/go.sum }
+      - run: go mod download
+      # -p 1: под Docker-contention параллельные testcontainer-пакеты таймаутят (testing.md).
+      - run: go test -race -count=1 -timeout 20m -p 1 ./...
 
   lint:
     name: golangci-lint
