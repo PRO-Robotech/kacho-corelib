@@ -7,7 +7,7 @@ package operations_test
 // накапливать idle-in-transaction через последовательные OutcomeSkip/resolver-error
 // орфаны и умирать по серверному idle_in_transaction_session_timeout — иначе весь
 // батч откатывается, и LRO-recovery не прогрессирует именно во время peer-outage,
-// ради восстановления которого reconciler и существует (findings3 DATA #2).
+// ради восстановления которого reconciler и существует.
 
 import (
 	"context"

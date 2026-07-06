@@ -84,7 +84,7 @@ type ReconcilerConfig struct {
 	// Sweep'а. ResolveTimeout ограничивает лишь ОДИН резолв; без агрегатного потолка
 	// claim-tx могла бы жить до BatchSize×ResolveTimeout (~1000s при outage), удерживая
 	// пул-коннект, FOR UPDATE row-locks и xmin-горизонт operations-таблицы против
-	// VACUUM на всё окно (findings6 DATA #4). При исчерпании бюджета Sweep коммитит
+	// VACUUM на всё окно. При исчерпании бюджета Sweep коммитит
 	// уже разрешённое и выходит; неразрешённые orphan'ы остаются durable (done=false)
 	// и добираются следующим Sweep'ом. Дефолт 30s; ≤0 → default.
 	SweepBudget time.Duration
@@ -136,10 +136,10 @@ func WithReconcilerLogger(l *slog.Logger) ReconcilerOption {
 // партиционируют множество (exactly-once), а не дерутся. Терминальная запись —
 // через тот же CAS-on-`done` (идемпотентна с live-worker'ом).
 type Reconciler struct {
-	pool     *pgxpool.Pool
-	resolver Resolver
-	rec      Recorder
-	log      *slog.Logger
+	pool           *pgxpool.Pool
+	resolver       Resolver
+	rec            Recorder
+	log            *slog.Logger
 	table          string
 	grace          time.Duration
 	batch          int
@@ -152,10 +152,10 @@ type Reconciler struct {
 func NewReconciler(pool *pgxpool.Pool, resolver Resolver, cfg ReconcilerConfig, opts ...ReconcilerOption) *Reconciler {
 	cfg = cfg.withDefaults()
 	rc := &Reconciler{
-		pool:     pool,
-		resolver: resolver,
-		rec:      NopRecorder{},
-		log:      slog.Default(),
+		pool:           pool,
+		resolver:       resolver,
+		rec:            NopRecorder{},
+		log:            slog.Default(),
 		table:          pgx.Identifier{cfg.Schema, "operations"}.Sanitize(),
 		grace:          cfg.OrphanGrace,
 		batch:          cfg.BatchSize,
@@ -219,7 +219,7 @@ func (rc *Reconciler) Sweep(ctx context.Context) (int, error) {
 	// пачки превышает SweepBudget, обрываем батч и коммитим уже разрешённое. Проверка
 	// в начале итерации — не начинаем новый резолв (до ResolveTimeout каждый), если
 	// бюджет уже исчерпан. Неразрешённые orphan'ы durable (done=false) → следующий
-	// Sweep (findings6 DATA #4: не держим claim-tx до BatchSize×ResolveTimeout).
+	// Sweep (не держим claim-tx до BatchSize×ResolveTimeout).
 	sweepDeadline := time.Now().Add(rc.sweepBudget)
 	for i := range orphans {
 		if time.Now().After(sweepDeadline) {

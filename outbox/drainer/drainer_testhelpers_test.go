@@ -26,7 +26,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
-// fgaOutboxSchema — verbatim copy of kacho-iam/internal/migrations/0002_fga_outbox.sql
+// fgaOutboxSchema — exact copy of kacho-iam/internal/migrations/0002_fga_outbox.sql
 // (only the fga_outbox table + trigger + index pieces; subject_change_outbox /
 // fga_model_version / watch_cursors omitted — not used by drainer).
 const fgaOutboxSchema = `
@@ -274,7 +274,7 @@ func (f *fakeApplier) waitForCalls(want int, timeout time.Duration) bool {
 // arbitrary delay (which a duplicate arriving after the sleep would escape).
 func waitStableInt64(sample func() int64, want int64, stableFor, timeout time.Duration) (int64, bool) {
 	deadline := time.Now().Add(timeout)
-	// Phase 1: reach `want`. An overshoot here already means a duplicate.
+	// Step 1: reach `want`. An overshoot here already means a duplicate.
 	for {
 		v := sample()
 		if v > want {
@@ -288,7 +288,7 @@ func waitStableInt64(sample func() int64, want int64, stableFor, timeout time.Du
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	// Phase 2: quiescence — value must remain == want for the whole window.
+	// Step 2: quiescence — value must remain == want for the whole window.
 	stableDeadline := time.Now().Add(stableFor)
 	for time.Now().Before(stableDeadline) {
 		if v := sample(); v != want {

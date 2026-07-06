@@ -82,7 +82,7 @@ type fakeServerStream struct {
 	ctx context.Context
 }
 
-func (s *fakeServerStream) Context() context.Context     { return s.ctx }
+func (s *fakeServerStream) Context() context.Context        { return s.ctx }
 func (s *fakeServerStream) SetHeader(md metadata.MD) error  { return nil }
 func (s *fakeServerStream) SendHeader(md metadata.MD) error { return nil }
 func (s *fakeServerStream) SetTrailer(md metadata.MD)       {}
@@ -512,7 +512,7 @@ func TestInterceptor_AllowSystemPrincipal(t *testing.T) {
 // principal-id string. A caller that forges x-kacho-principal-id=bootstrap with
 // any OTHER principal-type (e.g. "user") must NOT skip the per-RPC Check — it
 // must fall through to the normal authorization path. Regression guard for the
-// CWE-863 magic-string bypass (findings3 SEC #1).
+// CWE-863 magic-string bypass.
 func TestInterceptor_AllowSystemPrincipal_RejectsForgedBootstrapType(t *testing.T) {
 	checkCalled := false
 	stub := authz.CheckClientFunc(func(ctx context.Context, s, r, o string) (bool, error) {

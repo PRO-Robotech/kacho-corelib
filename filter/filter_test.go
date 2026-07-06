@@ -99,12 +99,12 @@ func TestToSQL(t *testing.T) {
 // A FilterAST built directly (bypassing Parse's allowedFields whitelist) with an
 // injection payload in Field must NOT splice raw SQL into the WHERE fragment.
 // ToSQL concatenates Field (values are parameterised), so Field must be
-// identifier-safe or defensively quoted. Regression guard for findings3 SEC #6
-// (CWE-89 / SQL injection via unvalidated Field).
+// identifier-safe or defensively quoted. Regression guard against CWE-89
+// (SQL injection via unvalidated Field).
 func TestToSQL_MaliciousFieldNeutralised(t *testing.T) {
 	ast := &FilterAST{Field: `1=1 OR name`, Op: "=", Value: "x"}
 	frag, _ := ast.ToSQL(1)
-	// The raw injection substring must never appear verbatim as SQL — a safe
+	// The raw injection substring must never appear unchanged as SQL — a safe
 	// implementation quotes the whole thing into a single identifier.
 	if strings.Contains(frag, "1=1 OR name = $1") {
 		t.Fatalf("injection payload spliced into WHERE fragment: %q", frag)
@@ -115,7 +115,7 @@ func TestToSQL_MaliciousFieldNeutralised(t *testing.T) {
 }
 
 // A legitimate whitelisted field (produced by Parse) must still be emitted
-// verbatim so the safe path is unchanged.
+// as-is so the safe path is unchanged.
 func TestToSQL_LegitFieldVerbatim(t *testing.T) {
 	for _, f := range []string{"name", "network_id", "placement_type"} {
 		ast := &FilterAST{Field: f, Op: "=", Value: "v"}
