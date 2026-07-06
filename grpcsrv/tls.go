@@ -23,13 +23,13 @@ package grpcsrv
 
 import (
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
-	"os"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/PRO-Robotech/kacho-corelib/internal/tlsutil"
 )
 
 // TLSServer is a HORIZONTAL, per-edge server-side TLS value-struct. It is
@@ -82,7 +82,7 @@ func TLSServerCreds(cfg TLSServer) (grpc.ServerOption, error) {
 		// RequireAndVerifyClientCert needs a client-CA bundle to verify against.
 		return nil, fmt.Errorf("grpcsrv: tls enabled but client_ca_files is empty (RequireAndVerifyClientCert needs a client CA)")
 	}
-	clientCAs, err := loadCAPool(cfg.ClientCAFiles)
+	clientCAs, err := tlsutil.LoadCAPool(cfg.ClientCAFiles)
 	if err != nil {
 		return nil, fmt.Errorf("grpcsrv: load client CA pool: %w", err)
 	}
@@ -94,20 +94,4 @@ func TLSServerCreds(cfg TLSServer) (grpc.ServerOption, error) {
 		MinVersion:   tls.VersionTLS12,
 	}
 	return grpc.Creds(credentials.NewTLS(tlsCfg)), nil
-}
-
-// loadCAPool reads PEM CA bundles into an x509.CertPool. An empty/garbage bundle
-// (no parseable certificate) is an error — fail-closed.
-func loadCAPool(files []string) (*x509.CertPool, error) {
-	pool := x509.NewCertPool()
-	for _, f := range files {
-		pem, err := os.ReadFile(f)
-		if err != nil {
-			return nil, fmt.Errorf("read CA file %q: %w", f, err)
-		}
-		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("no valid PEM certificate in CA file %q", f)
-		}
-	}
-	return pool, nil
 }

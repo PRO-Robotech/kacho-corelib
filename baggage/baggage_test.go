@@ -116,15 +116,20 @@ func TestExtract_CallerCancelDoesNotPropagate(t *testing.T) {
 
 	cancel() // Cancel caller — имитация handler returns.
 
-	// Маленькая пауза чтобы убедиться, что если бы cancel propagate'ил,
-	// он бы уже сработал.
-	time.Sleep(20 * time.Millisecond)
+	// Go's context cancellation propagates СИНХРОННО: cancel() закрывает Done
+	// каждого cancel-потомка ДО возврата. Поэтому если бы workerCtx был
+	// cancel-потомком callerCtx (регрессия WithoutCancel-severance), его Done
+	// уже был бы закрыт здесь — проверяем детерминированно, без real-clock окна.
+	// Раньше тест полагался на time.Sleep(20ms), что лишь маскировало бы
+	// отложенную propagation, а не ловило её fail-fast.
+	require.Error(t, callerCtx.Err(),
+		"caller-ctx должен быть cancelled сразу после cancel()")
 
 	select {
 	case <-workerCtx.Done():
 		t.Fatal("worker-ctx не должен cancel'иться когда caller-ctx cancel'ится")
 	default:
-		// OK — worker autonomous.
+		// OK — worker autonomous (WithoutCancel рвёт cancel-сигнал).
 	}
 	assert.NoError(t, workerCtx.Err(),
 		"worker-ctx.Err() должен быть nil несмотря на caller cancel")

@@ -328,3 +328,46 @@ inline-комментарии.
 `NewIDErr(prefix) (string, error)` для вызывающих, предпочитающих маппить
 RNG-сбой в gRPC `UNAVAILABLE`; существующий `NewID` не меняется. Не вводим
 превентивно (нет потребителя → speculative generality, запрещённая LEAN-проходом).
+
+## 13. `operations.extractResourceID` — reflection-fallback денормализации `resource_id`
+
+**Рубрика:** project-rule #10 — «within-service инвариант должен быть
+авторитетным, а не heuristic software-side derivation».
+
+**Как есть:** денорм-колонка `operations.resource_id` (по ней фильтрует
+`OperationService.List(resourceId=…)`, repo.go WHERE `resource_id = $n`)
+наполняется `resolveResourceID(op)` в порядке приоритета: (1) явный `op.ResourceID`,
+если use-case его задал; (2) proto-поле метаданных, названное **ровно**
+`resource_id`; (3) back-compat fallback — **первое непустое `*_id`-поле** метаданных
+через protobuf-reflection.
+
+**Остаточный hazard (шаг 3):** для `*Metadata`, где owning-ресурс объявлен НЕ
+первым `*_id`-полем (напр. `CreateFooMetadata{ project_id; foo_id }` — `project_id`
+первым, поля `resource_id` нет) И use-case НЕ задал `op.ResourceID` явно, fallback
+запишет в `resource_id` чужой id (`project_id`). Тогда
+`OperationService.List(resourceId="foo_…")` вернёт пусто (операция «спрятана» под
+`project_id`). Это gap **листинга** (не порча данных): сама операция создаётся/
+резолвится корректно, теряется только resource-scoped discovery.
+
+**Почему НЕ фиксится в corelib contract-safe проходом:**
+- **Тайтенинг fallback до «ровно одного `_id`-поля» — НЕ строго безопасен.** Для
+  метаданных с 2+ `_id`-полями, где первое `_id` — легитимный owning-ресурс (напр.
+  attach-операция `{ instance_id; disk_id }`, owner = `instance_id`), тайтенинг
+  вернул бы `""` и сломал бы ныне корректный List-by-resource → регрессия
+  потребителя. Эвристика по определению не отличает «первое `_id` = owner» от
+  «первое `_id` = чужой scope» без знания домена.
+- **Авторитетный фикс — кросс-репо.** Единственный надёжный путь: обязать все
+  use-case'ы задавать `op.ResourceID` явно (owning-ресурс известен точно на
+  Create) и убрать/загейтить reflection-fallback. Это меняет контракт вызова
+  `operations.Create` во всех сервисах (vpc/compute/iam/geo/nlb/apps) — вне scope
+  corelib-only прохода.
+
+**Митигация в corelib (сделано):** приоритет (1) явного `op.ResourceID` и (2)
+exact-имени `resource_id` над suffix-loop уже реализован (resolveResourceID/
+extractResourceID) — сервис, задающий любой из двух, никогда не попадает на
+неоднозначный fallback. Hazard достижим только для metadata с 2+ `_id` без
+`resource_id` И без явного `op.ResourceID`.
+
+**Эволюция:** координированная кросс-репо миграция — все use-case'ы задают
+`op.ResourceID` на Create, после чего reflection-fallback удаляется (денорм
+становится авторитетным, а не эвристическим). Трекается вне corelib.

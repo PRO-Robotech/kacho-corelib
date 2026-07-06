@@ -114,15 +114,6 @@ func (m RPCMap) Lookup(fullMethod string) (RPCEntry, bool) {
 	return e, ok
 }
 
-// PrincipalLike — узкий port-интерфейс для Principal'а. Используется
-// interceptor'ом, чтобы не зависеть от operations.Principal напрямую (хотя
-// и фактически он его реализует).
-//
-// Реализация — `operations.Principal` (поле .ID).
-type PrincipalLike interface {
-	GetID() string
-}
-
 // Decision — что interceptor решил сделать с RPC.
 type Decision int
 
