@@ -89,7 +89,7 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 }
 
-// rawPayload is the test-side decoder target — we keep the JSONB bytes verbatim
+// rawPayload is the test-side decoder target — we keep the JSONB bytes byte-for-byte
 // so per-test assertions can inspect any payload shape. The drainer must work
 // with any decoder T; raw []byte is the simplest universal T for tests.
 type rawPayload []byte
@@ -578,7 +578,7 @@ func TestW1_1_10_TwoDrainerInstances_HAExactlyOnce(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	// Insert 20 rows in one wave — both drainers will race on each NOTIFY.
+	// Insert 20 rows in one burst — both drainers will race on each NOTIFY.
 	const n = 20
 	for i := 0; i < n; i++ {
 		insertOutboxRow(t, ctx, pool1, "fga.tuple.write",

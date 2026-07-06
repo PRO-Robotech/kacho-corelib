@@ -84,9 +84,9 @@ type RPCEntry struct {
 	//
 	// Отличие от Public: ScopeFiltered RPC — публичный, требует
 	// аутентификации (валидный JWT на api-gateway); пропускается ТОЛЬКО
-	// per-RPC authz-Check. Public — internal-RPC (запрет #6), вообще вне
-	// tenant-authz. Mapping в `DecisionInternal` (skip) — общий, но смысл
-	// разный, поэтому отдельное поле.
+	// per-RPC authz-Check. Public — internal-RPC (не публикуется на external
+	// endpoint), вообще вне tenant-authz. Mapping в `DecisionInternal` (skip) —
+	// общий, но смысл разный, поэтому отдельное поле.
 	ScopeFiltered bool
 
 	// Permission — строка из permission-catalog в формате

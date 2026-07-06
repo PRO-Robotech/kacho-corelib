@@ -146,7 +146,7 @@ func (a *FilterAST) ToSQL(argStartIdx int) (string, []any) {
 	// мог бы пронести инъекцию в Field. Дословно эмитим только идентификатор-safe
 	// Field; иначе — защитно оборачиваем через pgx.Identifier.Sanitize (двойные
 	// кавычки + экранирование), гарантируя невозможность выхода за пределы
-	// идентификатора (CWE-89). Легитимные поля из Parse всегда проходят verbatim.
+	// идентификатора (CWE-89). Легитимные поля из Parse всегда проходят без изменений.
 	field := a.Field
 	if !safeFieldRe.MatchString(field) {
 		field = pgx.Identifier{a.Field}.Sanitize()

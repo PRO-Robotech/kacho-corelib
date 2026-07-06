@@ -7,7 +7,7 @@
 // Two orthogonal server-side identities coexist on a cluster-internal listener
 // and are BOTH made available downstream (for audit):
 //
-//   - cert-identity (the *module*): a verbatim, opaque SPIFFE-like SAN string
+//   - cert-identity (the *module*): an unmodified, opaque SPIFFE-like SAN string
 //     extracted from the verified client-cert presented over mTLS. This layer
 //     only extracts the string; it does NOT parse the sva-id, validate it against
 //     IAM, or resolve it to a ServiceAccount.
@@ -77,7 +77,7 @@ func WithTrustedForwarders(sans ...string) TrustedPrincipalOption {
 }
 
 // CertIdentity extracts the module identity from a (verified) client-cert as the
-// verbatim, opaque SPIFFE-like SAN string. Selection rule (part of the
+// unmodified, opaque SPIFFE-like SAN string. Selection rule (part of the
 // extractor contract): the FIRST URI-SAN whose value starts with
 // "spiffe://kacho.cloud/" is returned exactly as it appears in the cert; other
 // URI-SANs are ignored and the result is stable across calls.
