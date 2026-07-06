@@ -16,6 +16,7 @@ package authz_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -28,6 +29,13 @@ import (
 
 func startPG(t *testing.T) (pool *pgxpool.Pool, dsn string) {
 	t.Helper()
+	// Единый с остальными testcontainer-хелперами gate: под -short / SKIP_INTEGRATION
+	// Postgres+Docker-зависимый тест скипается (быстрый ci-джоб build-vet-test), а
+	// без флага — гоняется (integration-джоб). Иначе на раннере без Docker `go test
+	// -short ./...` падал бы вместо пропуска (см. operations/operations_test.go и др.).
+	if testing.Short() || os.Getenv("SKIP_INTEGRATION") == "1" {
+		t.Skip("integration tests skipped (SKIP_INTEGRATION=1)")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 

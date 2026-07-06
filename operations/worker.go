@@ -427,6 +427,30 @@ func (w *Worker) execute(j job) {
 		workerCtx, cancel = context.WithTimeout(workerCtx, w.opTimeout)
 		defer cancel()
 	}
+
+	// Pre-execution liveness re-arm + terminal-state guard. Пока job ждал в
+	// admission backlog, его строка НЕ heartbeat'илась (modified_at залочен на
+	// create-time), поэтому под перегрузкой Reconciler мог счесть ещё-живую
+	// queued-операцию orphan'ом и перевести её в ERROR. Безусловное исполнение fn
+	// создало бы phantom-ресурс при уже-ERROR-операции (клиент видит ERROR, а
+	// ресурс молча существует). ClaimForExecution атомарно подтверждает
+	// done=false И сдвигает modified_at=now: live=false → уже разрешена → fn
+	// ПРОПУСКАЕТСЯ; live=true → окно grace исполнения ограничено opTimeout
+	// (< OrphanGrace), Reconciler больше не мис-клеймит. Best-effort: Repo без
+	// executionClaimer (или transient claim-сбой) сохраняет pre-r9b поведение —
+	// terminalWrite-CAS всё равно не даст двойной терминал.
+	if claimer, ok := j.repo.(executionClaimer); ok {
+		switch live, claimErr := claimer.ClaimForExecution(workerCtx, j.opID); {
+		case claimErr != nil:
+			w.log.Warn("operation execution-claim failed; proceeding (terminalWrite CAS still guards)",
+				"op", j.opID, "err", claimErr)
+		case !live:
+			w.log.Warn("operation already terminal before execution; skipping fn to avoid phantom resource",
+				"op", j.opID)
+			return
+		}
+	}
+
 	var resp *anypb.Any
 	var err error
 

@@ -204,8 +204,23 @@ var ErrNoPath = errors.New("authz: no FGA path to resource")
 // Клиент возвращает этот sentinel, только сам сверив наличие объекта в своей БД.
 var ErrHideExistence = errors.New("authz: hide existence (deny on existing object)")
 
+// fgaReservedChar сообщает, способен ли символ изменить семантику FGA-токена
+// (object ИЛИ subject): ':' (граница type:id), '#' (userset-ссылка
+// type:id#relation), '@' и whitespace (' '/'\t'/'\n'). Единый набор для object- и
+// subject-санитизации — иначе один из путей доходит до FGA менее строго
+// проверенным, чем другой (defense-in-depth против userset-инъекции).
+func fgaReservedChar(r rune) bool {
+	switch r {
+	case ':', '#', '@', ' ', '\t', '\n':
+		return true
+	}
+	return false
+}
+
 // FormatObject форматирует FGA-object string: "<type>:<id>".
-// Возвращает err если type/id содержат запрещенные символы (':', whitespace).
+// Возвращает err если type/id содержат FGA-разделители (':', '#', '@', whitespace)
+// — симметрично subject-пути (validSubjectID), чтобы attacker-controlled resource
+// id не мог сдвинуть границу type:id или образовать userset-ссылку.
 func FormatObject(objectType, objectID string) (string, error) {
 	if objectType == "" {
 		return "", fmt.Errorf("authz: empty object type")
@@ -214,12 +229,12 @@ func FormatObject(objectType, objectID string) (string, error) {
 		return "", fmt.Errorf("authz: empty object id")
 	}
 	for _, r := range objectType {
-		if r == ':' || r == ' ' || r == '\t' || r == '\n' {
+		if fgaReservedChar(r) {
 			return "", fmt.Errorf("authz: invalid char in object type: %q", objectType)
 		}
 	}
 	for _, r := range objectID {
-		if r == ':' || r == ' ' || r == '\t' || r == '\n' {
+		if fgaReservedChar(r) {
 			return "", fmt.Errorf("authz: invalid char in object id: %q", objectID)
 		}
 	}
@@ -259,12 +274,12 @@ func FormatSubject(principalType, principalID string) string {
 
 // validSubjectID возвращает false, если principal id содержит символ, способный
 // изменить семантику FGA-subject строки: ':' (сдвиг границы type:id), '#'
-// (userset-ссылка `type:id#relation`), '@' и whitespace (' '/'\t'/'\n'). Набор
-// симметричен запрещённым символам FormatObject плюс FGA-специфичные '#'/'@'.
+// (userset-ссылка `type:id#relation`), '@' и whitespace (' '/'\t'/'\n'). Набор —
+// общий fgaReservedChar, симметричный с FormatObject (object- и subject-токены
+// санитизируются одинаково).
 func validSubjectID(id string) bool {
 	for _, r := range id {
-		switch r {
-		case ':', '#', '@', ' ', '\t', '\n':
+		if fgaReservedChar(r) {
 			return false
 		}
 	}

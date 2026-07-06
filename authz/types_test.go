@@ -74,6 +74,43 @@ func TestFormatSubject_AcceptsValid(t *testing.T) {
 	require.Equal(t, "user:bootstrap", FormatSubject("system", "bootstrap"))
 }
 
+// TestFormatObject_RejectsDelimiterInjection — FormatObject должен отвергать тот
+// же набор FGA-разделителей, что и validSubjectID: ':' (граница type:id), '#'
+// (userset-ссылка type:id#relation), '@' и whitespace. Раньше '#'/'@'
+// пропускались — object-токен доходил до FGA менее строго санитизированным, чем
+// subject (асимметрия). Симметрия закрывает класс userset-инъекции defense-in-depth.
+func TestFormatObject_RejectsDelimiterInjection(t *testing.T) {
+	cases := []struct {
+		name       string
+		objectType string
+		objectID   string
+	}{
+		{"hash-in-id", "vpc_network", "net#member"},
+		{"at-in-id", "vpc_network", "net@evil"},
+		{"colon-in-id", "vpc_network", "net:extra"},
+		{"space-in-id", "vpc_network", "net x"},
+		{"tab-in-id", "vpc_network", "net\ty"},
+		{"newline-in-id", "vpc_network", "net\ny"},
+		{"hash-in-type", "vpc#network", "net00000000000000000"},
+		{"at-in-type", "vpc@network", "net00000000000000000"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := FormatObject(tc.objectType, tc.objectID)
+			require.Error(t, err,
+				"reserved FGA char must be rejected symmetrically with the subject path")
+		})
+	}
+}
+
+// TestFormatObject_AcceptsValid — well-formed type/id (id — crockford-base32 без
+// разделителей) проходят без ошибки.
+func TestFormatObject_AcceptsValid(t *testing.T) {
+	got, err := FormatObject("vpc_network", "net00000000000000000")
+	require.NoError(t, err)
+	require.Equal(t, "vpc_network:net00000000000000000", got)
+}
+
 func TestRPCMap_LookupPreservesPermission(t *testing.T) {
 	m := RPCMap{
 		"/kacho.cloud.loadbalancer.v1.NetworkLoadBalancerService/Start": {

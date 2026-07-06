@@ -45,14 +45,6 @@ func IntToInt32(v int) int32 {
 	return ClampInt32(int64(v))
 }
 
-// IntToUint clamps a platform int into a uint, flooring negatives at 0.
-func IntToUint(v int) uint {
-	if v < 0 {
-		return 0
-	}
-	return uint(v)
-}
-
 // IntToUint32 saturates a platform int into the [0, math.MaxUint32] range,
 // flooring negatives at 0.
 func IntToUint32(v int) uint32 {
