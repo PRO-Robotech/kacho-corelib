@@ -50,6 +50,49 @@ func TestSystemPrincipal_StableValues(t *testing.T) {
 	assert.Equal(t, "System", got.DisplayName)
 }
 
+// TestNewFromContext_ScrubbedPrincipalDoesNotLeak — WithoutPrincipal() после
+// WithPrincipal(forged) — defense-in-depth scrub — обязан помешать forged
+// principal'у стать op.Principal/op.CreatedBy. NewFromContext должен вести
+// себя как PrincipalFromContextOK (ok=false после scrub), а не читать
+// ctx-значение напрямую в обход cleared-флага.
+func TestNewFromContext_ScrubbedPrincipalDoesNotLeak(t *testing.T) {
+	forged := operations.Principal{
+		Type:        "user",
+		ID:          "usr-forged",
+		DisplayName: "forged-attacker",
+	}
+	ctx := operations.WithPrincipal(context.Background(), forged)
+	ctx = operations.WithoutPrincipal(ctx)
+
+	op, err := operations.NewFromContext(ctx, "", "scrubbed-ctx op", nil)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, forged, op.Principal,
+		"scrubbed ctx не должен просочить forged principal в op.Principal")
+	assert.Equal(t, operations.Principal{}, op.Principal,
+		"scrubbed ctx должен оставить op.Principal нулевым (repo.Create сделает SystemPrincipal-fallback)")
+	assert.Equal(t, "anonymous", op.CreatedBy,
+		"scrubbed ctx не должен перетереть default CreatedBy forged principal.ID")
+}
+
+// TestNewFromContext_UnscrubbedPrincipalStillApplied — sanity: обычный
+// (не-scrubbed) ctx-principal по-прежнему переносится в op.Principal —
+// фикс scrub-проверки не должен сломать штатный путь.
+func TestNewFromContext_UnscrubbedPrincipalStillApplied(t *testing.T) {
+	p := operations.Principal{
+		Type:        "user",
+		ID:          "usr-real",
+		DisplayName: "real-user",
+	}
+	ctx := operations.WithPrincipal(context.Background(), p)
+
+	op, err := operations.NewFromContext(ctx, "", "unscrubbed-ctx op", nil)
+	require.NoError(t, err)
+
+	assert.Equal(t, p, op.Principal)
+	assert.Equal(t, "usr-real", op.CreatedBy)
+}
+
 // ---- repo-level тесты (testcontainers) ----
 
 // TestRepo_CreateWithPrincipal — CreateWithPrincipal пишет principal-колонки
