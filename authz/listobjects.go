@@ -187,8 +187,9 @@ type ListAllowedIDsOptions struct {
 // на которые subject имеет relation action.
 //
 // Семантика:
-//   - subjectID == "" → ErrUnavailable (нет анонимного listing'а с FGA; caller
-//     обязан выставить principal).
+//   - subjectID/resourceType/action == "" → validation error (обязательные
+//     аргументы; это caller-баг, НЕ fail-closed ErrUnavailable — caller обязан
+//     выставить principal перед listing'ом; анонимного listing'а с FGA нет).
 //   - cache hit → возвращает cached (≤1ms p95).
 //   - cache miss → client.ListObjects + cache.Put + return.
 //   - client error → fail-closed: ErrUnavailable.
