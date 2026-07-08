@@ -376,3 +376,47 @@ func Test_1_4_07b_GC_AntiRace_ConcurrentRecreateWins(t *testing.T) {
 		require.NoError(t, err)
 	}
 }
+
+// Test_1_4_08_EmitUnregister_CoCommit — delete-side of the anti-race
+// register-outbox contract. EmitUnregister co-commits an fga.unregister intent
+// in the caller's writer-tx (the same tx that deletes the resource); on commit a
+// pending fga.unregister row for the id lands in the SAME register-outbox table
+// the drainer drains, with the caller-supplied kind + payload. This mirrors a
+// real ApplicationService.Delete writing resource-delete + unregister-intent
+// atomically. Sibling EmitRegister is covered by Test_1_4_07b; this locks the
+// previously-untested delete side.
+func Test_1_4_08_EmitUnregister_CoCommit(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	pool := setupPG(t)
+
+	// Delete co-commits an fga.unregister intent for the removed resource.
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	require.NoError(t, err)
+	require.NoError(t, reconciler.EmitUnregister(ctx, tx, tbl, "apps_application", "app-del", `{"reason":"deleted"}`))
+	require.NoError(t, tx.Commit(ctx))
+
+	// Exactly one pending fga.unregister intent for the id, with the kind/payload.
+	assert.Equal(t, 1, pendingByResource(t, ctx, pool, "fga.unregister", "app-del"),
+		"delete co-commits exactly one fga.unregister intent")
+
+	var kind, payload string
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT resource_kind, payload::text FROM kacho_apps.fga_register_outbox
+		   WHERE event_type='fga.unregister' AND resource_id='app-del'`,
+	).Scan(&kind, &payload))
+	assert.Equal(t, "apps_application", kind, "caller-supplied resource_kind persisted")
+	assert.JSONEq(t, `{"reason":"deleted"}`, payload, "caller-supplied payload persisted")
+
+	// intendedRegistered contract: the latest intent for the id is an unregister,
+	// so it is NOT intended-registered (a subsequent GC pass would be a no-op —
+	// nothing to unregister that a register-intent has superseded).
+	var latest string
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT event_type FROM kacho_apps.fga_register_outbox
+		   WHERE resource_id='app-del' ORDER BY id DESC LIMIT 1`,
+	).Scan(&latest))
+	assert.Equal(t, "fga.unregister", latest, "unregister is the latest (delete-side) intent")
+}

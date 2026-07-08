@@ -17,6 +17,8 @@ import (
 	"google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
+
+	"github.com/PRO-Robotech/kacho-corelib/validate"
 )
 
 // Repo — интерфейс для хранения и обновления Operations.
@@ -355,9 +357,12 @@ func (r *pgRepo) ListOwned(ctx context.Context, filter ListFilter, owner Owner) 
 // добавляется ownerPredicateSQL (ownership-scoped выдача); при owner == nil —
 // unscoped (internal-only, см. IDOR-warning на List).
 func (r *pgRepo) listWithOwner(ctx context.Context, filter ListFilter, owner *Owner) ([]Operation, string, error) {
-	pageSize := filter.PageSize
-	if pageSize <= 0 || pageSize > 1000 {
-		pageSize = 50
+	// page_size дисциплина — единая для всех List RPC (api-conventions): 0 →
+	// DefaultPageSize, 1..MaxPageSize → как есть, вне диапазона (отрицательное /
+	// > MaxPageSize) → InvalidArgument (НЕ silent-clamp — это нарушение контракта).
+	pageSize, err := validate.PageSize("page_size", filter.PageSize)
+	if err != nil {
+		return nil, "", err
 	}
 
 	args := []any{}

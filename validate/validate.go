@@ -8,9 +8,10 @@
 // `BadRequest.field_violations[]` через `kacho-corelib/errors.InvalidArgument()`.
 //
 // Контракт валидации полей:
-//   - Name: 2..63 символов, regex `^[a-z][-a-z0-9]{0,61}[a-z0-9]$` (короткое
+//   - Name: 1..63 символа, regex `^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$` (короткое
 //     имя из строчных букв, цифр и дефисов; начинается с буквы; не оканчивается
-//     дефисом). Пустое имя — отдельная проверка `name is required`.
+//     дефисом; одна буква — валидна). Пустое имя — отдельная проверка
+//     `name is required`.
 //   - Description: до 256 символов.
 //   - Labels: до 64 пар; ключ `^[a-z][-_./\\a-z0-9]{0,62}$` (1..63 байта);
 //     значение 0..63 байта.
@@ -36,7 +37,8 @@ import (
 // Шаблон `/[a-z]([-a-z0-9]{0,61}[a-z0-9])?/`.
 //
 // Ровно: первый символ — строчная буква; далее — буквы, цифры, дефис; последний
-// символ — буква или цифра (не дефис). Длина 2..63.
+// символ — буква или цифра (не дефис). Длина 1..63 (одиночная буква валидна —
+// хвостовая группа `(...)?` опциональна).
 var nameRe = regexp.MustCompile(`^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$`)
 
 // nameReVPC — нестрогий regex имени для VPC ресурсов
@@ -94,7 +96,7 @@ const (
 func Name(field, value string) error {
 	if !nameRe.MatchString(value) {
 		return coreerrors.InvalidArgument().
-			AddFieldViolation(field, field+` must match ^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$ (lowercase letters, digits, hyphens; starts with letter, ends with letter or digit; 2..63 chars)`).
+			AddFieldViolation(field, field+` must match ^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$ (lowercase letters, digits, hyphens; starts with letter, ends with letter or digit; 1..63 chars)`).
 			Err()
 	}
 	return nil
@@ -307,32 +309,6 @@ func UpdateMask(field string, mask []string, known map[string]struct{}) error {
 	return nil
 }
 
-// resourceIDPrefixes — известные 3-символьные prefix'ы resource-id'ов Kachō.
-// Если появится новый домен с новым prefix — добавить сюда.
-//
-// ВАЖНО: набор обязан покрывать КАЖДЫЙ живой prefix платформы. Family-agnostic
-// `ResourceID` возвращает InvalidArgument на любой неизвестный 3-символьный
-// prefix, поэтому пропущенный здесь живой prefix превращает ЛЮБОЙ well-formed id
-// этого семейства в 400 на authz-edge api-gateway (вместо роутинга к
-// сервису-владельцу). Регрессионный guard (validate/validate_resourceid_test.go)
-// перечисляет все известные prefix'ы и падает, если какой-то не зарегистрирован тут.
-//
-// VPC (per-ресурс): Network=net, Subnet=sub, Address=adr, RouteTable=rtb,
-// SecurityGroup=sgr, Gateway=gtw, NetworkInterface=nic, AddressPool=apl.
-// Op-root VPC = enp (PrefixOperationVPC, для маршрутизации Operation.Get и
-// backward-compat существующих enp-операций).
-//
-// IAM: Account=acc, Project=prj, User=usr, ServiceAccount=sva, Group=grp,
-// Role=rol, AccessBinding=acb, Operation(IAM)=iop. (cag/cond/soc/evt — формат
-// `<prefix>_<…>` с underscore, не 3-char ids.NewID, и не на публичной
-// REST-поверхности под authz — здесь не нужны.)
-//
-// NLB: LoadBalancer=nlb (== PrefixOperationNLB), Listener=lst, TargetGroup=tgr.
-//
-// Legacy/прочие домены: Cloud/Folder=b1g, Organization=bpf (оставлены для
-// legacy operation-id), Instance/Disk=epd, Image/Snapshot=fd8. Старые enp/e9b
-// остаются known — family-agnostic проверка не должна давать InvalidArgument на
-// корректные id переходного периода.
 // EnvExtraResourceIDPrefixes — имя env-переменной с ДОПОЛНИТЕЛЬНЫМИ известными
 // 3-символьными resource-id prefix'ами (comma-separated, напр. "xyz,qqq").
 // Читается один раз при инициализации пакета и мёржится в базовый набор.
