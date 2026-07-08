@@ -379,3 +379,92 @@ func TestListObjects_ValidationEmptySubject(t *testing.T) {
 		t.Fatalf("err = %v, empty subject must be a validation error, NOT the ErrUnavailable sentinel", err)
 	}
 }
+
+// TestListObjectsCache_EvictionBoundsSize — CWE-770-style guard: под churn
+// сильно выше maxSize (много distinct cache-key), evictIfNeededLocked обязан
+// удержать общий размер ≤ maxSize. Зеркалит authz.TestCache_MaxEntriesBound
+// (cache_test.go), применённый к двухуровневому listObjectsCache.
+func TestListObjectsCache_EvictionBoundsSize(t *testing.T) {
+	const maxSize = 100
+	c := newListObjectsCache(maxSize, time.Hour)
+
+	for i := 0; i < maxSize*20; i++ {
+		subj := fmt.Sprintf("user:usr_%d", i)
+		key := cacheKeyFor(subj, "vpc_network", "act", "", "")
+		c.put(key, subj, []string{"id"})
+	}
+
+	_, entries := c.size()
+	if entries > maxSize {
+		t.Fatalf("cache exceeded maxSize: got %d, want <= %d", entries, maxSize)
+	}
+}
+
+// TestListObjectsCache_EvictionPurgesExpiredFirst — при достижении потолка
+// evictIfNeededLocked обязан сперва вычистить просроченные entries; если их
+// достаточно, свежая запись выживает без произвольной эвикции. Зеркалит
+// authz.TestCache_MaxEntriesEvictsExpiredFirst.
+func TestListObjectsCache_EvictionPurgesExpiredFirst(t *testing.T) {
+	const maxSize = 10
+	base := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	now := base
+	c := newListObjectsCache(maxSize, 5*time.Second)
+	c.setNowFunc(func() time.Time { return now })
+
+	for i := 0; i < maxSize; i++ {
+		subj := fmt.Sprintf("user:usr_stale_%d", i)
+		key := cacheKeyFor(subj, "vpc_network", "act", "", "")
+		c.put(key, subj, []string{"old"})
+	}
+	// Просрочиваем всё.
+	now = base.Add(6 * time.Second)
+	// Новый insert → потолок достигнут, но все старые просрочены → чистятся
+	// (фаза 1 expired-sweep), свежая запись выживает без произвольной эвикции.
+	freshKey := cacheKeyFor("user:usr_fresh", "vpc_network", "act", "", "")
+	c.put(freshKey, "user:usr_fresh", []string{"new"})
+
+	_, entries := c.size()
+	if entries > maxSize {
+		t.Fatalf("cache exceeded maxSize after expiry sweep: got %d, want <= %d", entries, maxSize)
+	}
+	if _, ok := c.get(freshKey); !ok {
+		t.Fatalf("fresh entry must survive; expired entries should have been reclaimed first")
+	}
+}
+
+// TestListObjectsCache_EvictionIsLinearNotQuadratic — regression guard against
+// the O(N^2) full insertion-sort eviction that used to run under c.mu on every
+// put() past maxSize (authz/listobjects.go finding, round-7 audit). With
+// maxSize=10000 churned by 10x puts, eviction fires roughly every maxSize/10
+// puts; the old insertion-sort re-sorted ALL ~10000 live entries each time
+// (~2.5e7 swaps/eviction, ~90 evictions across this run) — multi-second wall
+// time. The O(N) expired-sweep + arbitrary-eviction-to-low-water replacement
+// (mirrors authz.Cache.evictLocked) does the same churn in well under a
+// second. The elapsed-time budget below is deliberately generous (10x+
+// margin over observed O(N) runtime) so it only trips on an algorithmic
+// regression, not machine noise.
+func TestListObjectsCache_EvictionIsLinearNotQuadratic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("large-N perf regression guard skipped in -short")
+	}
+	const maxSize = 10000
+	const totalPuts = 100000
+	c := newListObjectsCache(maxSize, time.Hour)
+
+	start := time.Now()
+	for i := 0; i < totalPuts; i++ {
+		subj := fmt.Sprintf("user:usr_%d", i)
+		key := cacheKeyFor(subj, "vpc_network", "act", "", "")
+		c.put(key, subj, []string{"id"})
+	}
+	elapsed := time.Since(start)
+
+	_, entries := c.size()
+	if entries > maxSize {
+		t.Fatalf("cache exceeded maxSize after churn: got %d, want <= %d", entries, maxSize)
+	}
+	const budget = 3 * time.Second
+	if elapsed > budget {
+		t.Fatalf("put() with %d-entry eviction churn took %v, want < %v (O(N^2) insertion-sort regression?)", totalPuts, elapsed, budget)
+	}
+}

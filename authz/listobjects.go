@@ -317,6 +317,12 @@ type listObjectsCache struct {
 
 	// store: subject → set of entries
 	store map[string]map[string]listObjectsEntry
+
+	// count — точное текущее число entry во всех subject-bucket'ах, зеркалит
+	// authz.Cache.count. Поддерживается инкрементально на insert/delete, чтобы
+	// size-check в evictIfNeededLocked был O(1), а не full map-traversal на
+	// КАЖДОМ put() (иначе даже без единой эвикции N put'ов стоили бы O(N^2)).
+	count int
 }
 
 type listObjectsEntry struct {
@@ -373,9 +379,12 @@ func (c *listObjectsCache) get(key string) ([]string, bool) {
 	if c.now().After(e.expiresAt) {
 		c.mu.Lock()
 		if subMap, ok := c.store[subject]; ok {
-			delete(subMap, key)
-			if len(subMap) == 0 {
-				delete(c.store, subject)
+			if _, stillPresent := subMap[key]; stillPresent {
+				delete(subMap, key)
+				c.count--
+				if len(subMap) == 0 {
+					delete(c.store, subject)
+				}
 			}
 		}
 		c.mu.Unlock()
@@ -394,61 +403,92 @@ func (c *listObjectsCache) put(key, subjectID string, ids []string) {
 	// Defensive copy.
 	stored := make([]string, len(ids))
 	copy(stored, ids)
+	newEntry := listObjectsEntry{
+		ids:       stored,
+		expiresAt: c.now().Add(c.ttl),
+	}
 
+	// Overwrite-in-place (renewal of an existing key) doesn't change size —
+	// no eviction check needed. Зеркалит Cache.SetAllowed.
+	if sm, ok := c.store[subjectID]; ok {
+		if _, exists := sm[key]; exists {
+			sm[key] = newEntry
+			return
+		}
+	}
+
+	// New key — bound cache size BEFORE insert (O(1) count check, see
+	// evictIfNeededLocked doc).
+	if c.count >= c.maxSize {
+		c.evictIfNeededLocked()
+	}
 	subMap, ok := c.store[subjectID]
 	if !ok {
 		subMap = make(map[string]listObjectsEntry, 4)
 		c.store[subjectID] = subMap
 	}
-	subMap[key] = listObjectsEntry{
-		ids:       stored,
-		expiresAt: c.now().Add(c.ttl),
-	}
-
-	// LRU-ish eviction — если total > maxSize, выбрасываем oldest entries
-	// (linear scan — приемлемо до ~10k, что соответствует maxSize default).
-	c.evictIfNeededLocked()
+	subMap[key] = newEntry
+	c.count++
 }
 
+// evictIfNeededLocked приводит размер кеша под maxSize. Вызывается под write
+// lock из put() ПЕРЕД вставкой нового ключа, когда count достиг maxSize.
+// Зеркалит authz.Cache.evictLocked (cache.go): фаза 1 — дешёвый
+// expired-sweep (точнее и почти всегда достаточно — просроченные entries
+// обычно и есть тот "излишек"); фаза 2 (если всё ещё полно) — произвольная
+// map-iteration эвикция до low-water (maxSize - maxSize/10), БЕЗ сортировки.
+//
+// Раньше (round-7 audit finding) эта функция (a) на каждом put() пересчитывала
+// total полным обходом ВСЕГО store (O(N) даже когда эвикция не нужна — O(N^2)
+// суммарно на N put'ов) и (b) при переполнении делала insertion-sort по ВСЕМ
+// live entries (O(N^2) на саму эвикцию, N~10000 → ~2.5e7 swaps под write
+// lock, блокируя все concurrent get()). Оба обхода заменены: (a) — на
+// инкрементальный c.count (обновляется на каждой вставке/удалении), (b) — на
+// два O(N)-прохода по map без сортировки. Произвольная эвикция
+// correctness-neutral: cache-miss всегда откатывается на авторитетный
+// ListObjects-вызов (fail-closed re-fetch) — эвикция бьёт только по
+// hit-rate, не по корректности.
 func (c *listObjectsCache) evictIfNeededLocked() {
-	total := 0
-	for _, sm := range c.store {
-		total += len(sm)
-	}
-	if total <= c.maxSize {
+	if c.count < c.maxSize {
 		return
 	}
-	// Удаляем 10% oldest entries (batch eviction).
-	toEvict := total - c.maxSize + c.maxSize/10
-	type ref struct {
-		subj string
-		key  string
-		exp  time.Time
-	}
-	var oldest []ref
+
+	// Фаза 1: expired-sweep.
+	now := c.now()
 	for subj, sm := range c.store {
 		for k, e := range sm {
-			oldest = append(oldest, ref{subj: subj, key: k, exp: e.expiresAt})
-		}
-	}
-	// Сортировка по exp ascending — берем первые `toEvict`. Insertion-sort
-	// для маленьких N приемлем.
-	for i := 1; i < len(oldest); i++ {
-		j := i
-		for j > 0 && oldest[j-1].exp.After(oldest[j].exp) {
-			oldest[j-1], oldest[j] = oldest[j], oldest[j-1]
-			j--
-		}
-	}
-	if toEvict > len(oldest) {
-		toEvict = len(oldest)
-	}
-	for _, r := range oldest[:toEvict] {
-		if sm, ok := c.store[r.subj]; ok {
-			delete(sm, r.key)
-			if len(sm) == 0 {
-				delete(c.store, r.subj)
+			if now.After(e.expiresAt) {
+				delete(sm, k)
+				c.count--
 			}
+		}
+		if len(sm) == 0 {
+			delete(c.store, subj)
+		}
+	}
+	if c.count < c.maxSize {
+		return
+	}
+
+	// Фаза 2: всё ещё полно — эвиктим произвольные entry (map-iteration
+	// order) до low-water, чтобы не триггерить эвикцию на каждом следующем put.
+	target := c.maxSize - c.maxSize/10
+	if target < 0 {
+		target = 0
+	}
+	for subj, sm := range c.store {
+		for k := range sm {
+			if c.count <= target {
+				break
+			}
+			delete(sm, k)
+			c.count--
+		}
+		if len(sm) == 0 {
+			delete(c.store, subj)
+		}
+		if c.count <= target {
+			break
 		}
 	}
 }
@@ -456,21 +496,23 @@ func (c *listObjectsCache) evictIfNeededLocked() {
 func (c *listObjectsCache) invalidateBySubject(subjectID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.store, subjectID)
+	if sm, ok := c.store[subjectID]; ok {
+		c.count -= len(sm)
+		delete(c.store, subjectID)
+	}
 }
 
 func (c *listObjectsCache) invalidateAll() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.store = make(map[string]map[string]listObjectsEntry, 64)
+	c.count = 0
 }
 
 func (c *listObjectsCache) size() (subjects, entries int) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	subjects = len(c.store)
-	for _, sm := range c.store {
-		entries += len(sm)
-	}
+	entries = c.count
 	return
 }
