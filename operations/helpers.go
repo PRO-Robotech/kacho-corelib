@@ -4,6 +4,7 @@
 package operations
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -54,24 +55,26 @@ func New(domainPrefix, description string, metadata proto.Message) (Operation, e
 }
 
 // NewFromContext — то же что New, но также заполняет op.Principal из ctx
-// (через PrincipalFromContext). Удобный shortcut для use-case'ов, которые
+// (через PrincipalFromContextOK). Удобный shortcut для use-case'ов, которые
 // получают Principal в ctx от auth-interceptor api-gateway.
 //
-// Без ctx-Principal — op.Principal остается zero (Create в repo сделает
-// fallback к SystemPrincipal). С ctx-Principal — он переносится в op.Principal,
-// и Create / CreateWithPrincipal будут использовать его как источник правды.
-func NewFromContext(ctx interface {
-	Value(any) any
-}, domainPrefix, description string, metadata proto.Message) (Operation, error) {
+// Без ctx-Principal (нет auth-interceptor'а, ИЛИ ctx был явно scrub'нут
+// через WithoutPrincipal — defense-in-depth снятие forwarded-principal на
+// недоверенном peer'е) — op.Principal остается zero (Create в repo сделает
+// fallback к SystemPrincipal). С явно установленным (и не-scrub'нутым)
+// ctx-Principal — он переносится в op.Principal, и Create / CreateWithPrincipal
+// будут использовать его как источник правды.
+func NewFromContext(ctx context.Context, domainPrefix, description string, metadata proto.Message) (Operation, error) {
 	op, err := New(domainPrefix, description, metadata)
 	if err != nil {
 		return op, err
 	}
-	if v, ok := ctx.Value(principalCtxKey{}).(Principal); ok && v != (Principal{}) {
+	if v, ok := PrincipalFromContextOK(ctx); ok && v != (Principal{}) {
 		op.Principal = v
 		// Также синхронизируем CreatedBy с principal.ID для backward-compat
 		// (старые клиенты читают createdBy; новые — principal_*). Default
-		// "anonymous" из New() сохраняется только если ctx-principal нет.
+		// "anonymous" из New() сохраняется только если ctx-principal нет
+		// (в т.ч. если ctx явно scrub'нут через WithoutPrincipal).
 		if v.ID != "" {
 			op.CreatedBy = v.ID
 		}
