@@ -366,11 +366,16 @@ func TestListObjects_Concurrent(t *testing.T) {
 	}
 }
 
-// Validation: subject == "" → error.
+// Validation: subject == "" → validation error, а НЕ fail-closed ErrUnavailable.
+// Пустой subject — это caller-баг (не выставил principal), не недоступность FGA;
+// doc-контракт ListAllowedIDs обязан их различать (caller мапит 400 vs 503).
 func TestListObjects_ValidationEmptySubject(t *testing.T) {
 	svc := newSvc(t, &fakeClient{})
 	_, err := svc.ListAllowedIDs(context.Background(), "", "vpc_network", "act", ListAllowedIDsOptions{})
 	if err == nil {
 		t.Fatal("empty subject must error")
+	}
+	if errors.Is(err, ErrUnavailable) {
+		t.Fatalf("err = %v, empty subject must be a validation error, NOT the ErrUnavailable sentinel", err)
 	}
 }

@@ -331,6 +331,18 @@ func (w *Worker) Stop() {
 func (w *Worker) runOn(callerCtx context.Context, repo Repo, opID string, fn func(context.Context) (*anypb.Any, error)) {
 	w.ensureStarted()
 	w.mu.Lock()
+	select {
+	case <-w.stopCh:
+		// Worker остановлен: dispatcher больше не разбирает backlog. НЕ enqueue'им
+		// (и НЕ делаем wg.Add) — иначе задача осела бы в backlog навсегда, а её
+		// wg-счётчик заблокировал бы Wait(). Операция durable в БД → reconciler.
+		// Проверка под mu сериализуется с drainBacklog (тоже под mu): либо задача
+		// добавлена до drain'а и им закрыта, либо мы видим stopCh и не добавляем.
+		w.mu.Unlock()
+		w.log.Warn("operation submitted after worker stop; deferring to reconciler", "op", opID)
+		return
+	default:
+	}
 	if w.maxBacklog > 0 && len(w.backlog) >= w.maxBacklog {
 		// Backpressure: backlog переполнен. Операция уже durable в БД (создана до
 		// Run) — не держим ее в памяти, reconciler добьет. Без потери данных.
@@ -375,6 +387,10 @@ func (w *Worker) dequeue() (job, bool) {
 func (w *Worker) dispatch() {
 	defer func() {
 		w.up.Store(false)
+		// Задачи, оставшиеся в backlog на момент остановки, НЕ будут исполнены
+		// (durable в БД → reconciler), но их wg.Add из runOn обязан быть закрыт —
+		// иначе Wait() навсегда заблокируется (wg != 0). См. drainBacklog.
+		w.drainBacklog()
 		close(w.dispDone)
 	}()
 	for {
@@ -388,6 +404,10 @@ func (w *Worker) dispatch() {
 			case w.sem <- struct{}{}:
 				w.launch(j)
 			case <-w.stopCh:
+				// j уже извлечён из backlog (drainBacklog его не увидит), но его
+				// wg.Add сделан в runOn — закрываем счётчик здесь; строка durable
+				// в БД → добирается reconciler'ом.
+				w.wg.Done()
 				return
 			}
 		}
@@ -396,6 +416,26 @@ func (w *Worker) dispatch() {
 		case <-w.stopCh:
 			return
 		}
+	}
+}
+
+// drainBacklog освобождает wg-счётчик задач, оставшихся в admission backlog на
+// момент остановки dispatcher'а. Каждой из них runOn уже сделал wg.Add(1); без
+// парного wg.Done последующий или конкурентный Wait() никогда не дошёл бы до
+// wg==0 (spurious timeout, утечка wg.Wait-горутины). Задачи не исполняются —
+// они durable в БД (созданы до Run) и добираются reconciler'ом. Выполняется в
+// defer dispatch (stopCh уже закрыт), поэтому вместе со stop-guard в runOn
+// исключает и enqueue-after-stop-утечку.
+func (w *Worker) drainBacklog() {
+	w.mu.Lock()
+	n := len(w.backlog)
+	for i := range w.backlog {
+		w.backlog[i] = job{} // освобождаем ссылки на ctx/closure
+	}
+	w.backlog = nil
+	w.mu.Unlock()
+	for i := 0; i < n; i++ {
+		w.wg.Done()
 	}
 }
 
