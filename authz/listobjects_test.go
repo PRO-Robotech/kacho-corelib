@@ -321,6 +321,67 @@ func TestListObjects_PerPageDeadline(t *testing.T) {
 	}
 }
 
+// TestListObjects_PaginationPageBound — defense-in-depth: an adversarial/buggy
+// peer that returns a perpetual non-empty (ever-changing) NextPageToken with
+// pages that never accumulate to maxResults must NOT spin the handler goroutine
+// forever hammering FGA. The loop must be bounded by the number of pages we
+// could ever need to fill maxResults.
+//
+// The fake has a hard safety stop so a REGRESSION (missing bound) terminates the
+// test instead of hanging; the assertion is that the real code stopped WELL
+// before that safety stop — i.e. at the maxResults page bound.
+func TestListObjects_PaginationPageBound(t *testing.T) {
+	const safetyStop = 50 // fake gives up here so a broken loop can't hang the suite
+	client := &fakeClient{
+		fn: func(_ context.Context, req ListObjectsRequest) (ListObjectsResponse, error) {
+			n := 0
+			_, _ = fmt.Sscanf(req.PageToken, "tok-%d", &n)
+			if n >= safetyStop {
+				return ListObjectsResponse{ResourceIDs: nil, NextPageToken: ""}, nil
+			}
+			// 0 new ids, but a fresh continuation token every time.
+			return ListObjectsResponse{ResourceIDs: nil, NextPageToken: fmt.Sprintf("tok-%d", n+1)}, nil
+		},
+	}
+	svc := newSvc(t, client)
+
+	ids, err := svc.ListAllowedIDs(context.Background(), "user:usr_alice", "vpc_network", "vpc.networks.read", ListAllowedIDsOptions{MaxResults: 3})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("ids = %v, want empty", ids)
+	}
+	// With MaxResults=3 the loop must stop after at most 3 pages, never reaching
+	// the fake's safety stop.
+	if got := client.calls.Load(); got != 3 {
+		t.Fatalf("ListObjects called %d times, want bounded at 3 (maxResults page bound)", got)
+	}
+}
+
+// TestListObjects_PaginationUnchangedToken — a peer that returns the SAME
+// continuation token it was just handed is stuck; the loop must break instead of
+// re-requesting the identical page indefinitely.
+func TestListObjects_PaginationUnchangedToken(t *testing.T) {
+	client := &fakeClient{
+		fn: func(_ context.Context, req ListObjectsRequest) (ListObjectsResponse, error) {
+			return ListObjectsResponse{ResourceIDs: nil, NextPageToken: "stuck"}, nil
+		},
+	}
+	svc := newSvc(t, client) // MaxResults default 10000 — only the unchanged-token guard can stop this
+
+	ids, err := svc.ListAllowedIDs(context.Background(), "user:usr_alice", "vpc_network", "vpc.networks.read", ListAllowedIDsOptions{MaxResults: 10000})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("ids = %v, want empty", ids)
+	}
+	if got := client.calls.Load(); got != 2 {
+		t.Fatalf("ListObjects called %d times, want 2 (break once the token stops advancing)", got)
+	}
+}
+
 // Scope hint produces different cache entries.
 func TestListObjects_ScopeHintSeparateCache(t *testing.T) {
 	client := &fakeClient{

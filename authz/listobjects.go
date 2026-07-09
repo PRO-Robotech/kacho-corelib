@@ -228,9 +228,23 @@ func (s *ListObjectsService) ListAllowedIDs(
 	// 2-я страница унаследовала бы усохший остаток бюджета и упала бы closed в
 	// ErrUnavailable, хотя peer жив и просто paginating. Поле FollowupTimeout
 	// документировано как «таймаут одного RPC-вызова» — применяем per-page.
+	// Defense-in-depth: bound the paginating loop. Each page carries its own
+	// FollowupTimeout (per-call deadline), but there is otherwise no aggregate
+	// limit over the whole loop — only the parent ctx. A buggy/adversarial
+	// ListObjects returning a perpetual non-empty NextPageToken whose pages never
+	// accumulate to maxResults (repeated empty pages, or an unchanged token)
+	// would spin this handler goroutine forever and hammer FGA. Two guards bound
+	// it without cutting a healthy multi-page peer (which either fills maxResults
+	// or exhausts its token first): (a) an absolute page cap — we never need more
+	// than maxResults pages to accumulate maxResults ids; (b) an unchanged-token
+	// break — an honest paginator never hands back the token it was just given.
+	maxPages := int(maxResults)
+	if maxPages < 1 {
+		maxPages = 1
+	}
 	allIDs := make([]string, 0, 64)
 	pageToken := ""
-	for {
+	for pages := 0; ; pages++ {
 		resp, err := s.listObjectsOnce(ctx, ListObjectsRequest{
 			Subject:      subjectID,
 			ResourceType: resourceType,
@@ -256,6 +270,12 @@ func (s *ListObjectsService) ListAllowedIDs(
 			break
 		}
 		if uint32(len(allIDs)) >= maxResults {
+			break
+		}
+		// Fail-safe (not forever): stuck token, or more pages than we could ever
+		// need to fill maxResults → stop. Under-returning is correctness-neutral
+		// here: the next cache-miss re-fetches authoritatively.
+		if resp.NextPageToken == pageToken || pages+1 >= maxPages {
 			break
 		}
 		pageToken = resp.NextPageToken
