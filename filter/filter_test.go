@@ -85,6 +85,39 @@ func TestParse_SpacedEquals(t *testing.T) {
 	}
 }
 
+// A field name must start with a letter or underscore — the exact identifier
+// shape safeFieldRe (`^[a-zA-Z_]…`) and ToSQL's verbatim path promise. A
+// digit-leading name must be rejected by Parse, otherwise it would be accepted
+// yet fail safeFieldRe and get double-quoted by ToSQL (breaking the
+// "legit Parse field is emitted verbatim" invariant). Regression guard for the
+// Parse-vs-safeFieldRe first-char agreement.
+func TestParse_DigitLeadingFieldRejected(t *testing.T) {
+	// Whitelist the digit-leading name so the only thing that can reject it is
+	// the first-char identifier rule, not the allowedFields check.
+	ast, err := Parse(`3name = "x"`, []string{"3name"})
+	if ast != nil {
+		t.Fatalf("expected nil AST for digit-leading field, got %+v", ast)
+	}
+	if err == nil || !strings.Contains(err.Error(), "Expected a field name") {
+		t.Fatalf("expected Expected a field name, got %v", err)
+	}
+}
+
+// Every field name Parse accepts must pass safeFieldRe unchanged, so ToSQL
+// emits it verbatim (never the defensive pgx.Identifier.Sanitize path). Locks
+// the comment invariant "легитимные поля из Parse всегда проходят без изменений".
+func TestParse_AcceptedFieldIsSafeVerbatim(t *testing.T) {
+	for _, f := range []string{"name", "_x", "a1", "schema.table"} {
+		ast, err := Parse(f+`="v"`, []string{f})
+		if err != nil {
+			t.Fatalf("Parse rejected legit field %q: %v", f, err)
+		}
+		if !safeFieldRe.MatchString(ast.Field) {
+			t.Fatalf("field %q accepted by Parse but fails safeFieldRe", ast.Field)
+		}
+	}
+}
+
 func TestToSQL(t *testing.T) {
 	ast := &FilterAST{Field: "name", Op: "=", Value: "foo"}
 	frag, args := ast.ToSQL(3)

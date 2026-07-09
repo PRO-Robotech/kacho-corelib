@@ -63,12 +63,17 @@ func Parse(input string, allowedFields []string) (*FilterAST, error) {
 		return nil, nil
 	}
 
-	// 1. Извлекаем имя поля
+	// 1. Извлекаем имя поля. Идентификатор: первый символ — буква или '_',
+	// далее — буквы/цифры/'_'/'.'. Тот же набор, что принимает safeFieldRe,
+	// поэтому легитимное поле дословно проходит ToSQL без защитного quoting'а.
 	col := 1
 	i := 0
 	fieldStart := i
-	for i < len(input) && (isAlpha(input[i]) || input[i] == '_' || input[i] == '.') {
+	if i < len(input) && (isLetter(input[i]) || input[i] == '_') {
 		i++
+		for i < len(input) && (isAlphaNum(input[i]) || input[i] == '_' || input[i] == '.') {
+			i++
+		}
 	}
 	field := input[fieldStart:i]
 	if field == "" {
@@ -128,8 +133,12 @@ func Parse(input string, allowedFields []string) (*FilterAST, error) {
 	return &FilterAST{Field: field, Op: "=", Value: value}, nil
 }
 
-func isAlpha(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+func isLetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+func isAlphaNum(b byte) bool {
+	return isLetter(b) || (b >= '0' && b <= '9')
 }
 
 // ToSQL превращает AST в безопасный SQL fragment.
