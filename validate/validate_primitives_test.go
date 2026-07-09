@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -185,6 +186,28 @@ func TestLabels(t *testing.T) {
 				t.Fatalf("unexpected error for %s: %v", tc.name, err)
 			}
 		})
+	}
+}
+
+// TestLabels_InvalidKeyMessageListsAtSign локает contract-текст FieldViolation:
+// labelKeyRe допускает '@' в ключе (см. valid-special-key-chars), поэтому
+// user-facing allowed-set в сообщении обязан перечислять '@'. Без этого doc/msg
+// расходятся с regex (doc-truthfulness): контрибьютор, сверяя код с сообщением,
+// удалил бы '@' из regex и молча отверг ранее-валидные ключи вроде `owner@team`.
+func TestLabels_InvalidKeyMessageListsAtSign(t *testing.T) {
+	err := Labels("labels", map[string]string{"Bad": "v"}) // uppercase → invalid key
+	requireInvalidArgument(t, err, "invalid-key")
+	st, _ := status.FromError(err)
+	var desc string
+	for _, d := range st.Details() {
+		if br, ok := d.(*errdetails.BadRequest); ok {
+			for _, fv := range br.GetFieldViolations() {
+				desc = fv.GetDescription()
+			}
+		}
+	}
+	if !strings.Contains(desc, "@") {
+		t.Fatalf("label-key FieldViolation must list '@' in allowed set (regex allows it), got: %q", desc)
 	}
 }
 
