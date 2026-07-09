@@ -222,14 +222,16 @@ func (s *ListObjectsService) ListAllowedIDs(
 		}
 	}
 
-	// Cache miss: вызов client под FollowupTimeout.
-	callCtx, cancel := context.WithTimeout(ctx, s.cfg.FollowupTimeout)
-	defer cancel()
-
+	// Cache miss: каждый page-вызов client под собственным FollowupTimeout
+	// (per-call deadline на КАЖДОМ внешнем вызове — architecture.md). Единый
+	// таймаут на весь paginating-loop спуриозно резал бы здоровый multi-page peer:
+	// 2-я страница унаследовала бы усохший остаток бюджета и упала бы closed в
+	// ErrUnavailable, хотя peer жив и просто paginating. Поле FollowupTimeout
+	// документировано как «таймаут одного RPC-вызова» — применяем per-page.
 	allIDs := make([]string, 0, 64)
 	pageToken := ""
 	for {
-		resp, err := s.client.ListObjects(callCtx, ListObjectsRequest{
+		resp, err := s.listObjectsOnce(ctx, ListObjectsRequest{
 			Subject:      subjectID,
 			ResourceType: resourceType,
 			Action:       action,
@@ -263,6 +265,16 @@ func (s *ListObjectsService) ListAllowedIDs(
 	// FGA на каждый poll). InvalidateBySubject выкинет это на revoke.
 	s.cache.put(key, subjectID, allIDs)
 	return allIDs, nil
+}
+
+// listObjectsOnce делает ровно один ListObjects-вызов под собственным
+// per-call deadline (FollowupTimeout). Выделен, чтобы `defer cancel()` каждой
+// страницы срабатывал по завершении именно этой итерации, а не в конце всего
+// paginating-loop'а.
+func (s *ListObjectsService) listObjectsOnce(ctx context.Context, req ListObjectsRequest) (ListObjectsResponse, error) {
+	callCtx, cancel := context.WithTimeout(ctx, s.cfg.FollowupTimeout)
+	defer cancel()
+	return s.client.ListObjects(callCtx, req)
 }
 
 // InvalidateBySubject — вызывается из LISTEN-invalidator при NOTIFY

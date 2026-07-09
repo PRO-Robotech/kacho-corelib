@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	"github.com/PRO-Robotech/kacho-corelib/auth"
+	"github.com/PRO-Robotech/kacho-corelib/authz"
 	"github.com/PRO-Robotech/kacho-corelib/grpcsrv"
 	"github.com/PRO-Robotech/kacho-corelib/operations"
 )
@@ -102,11 +103,41 @@ func TestSystemPrincipalFor_FormatsCorrectly(t *testing.T) {
 	if p.Type != "user" {
 		t.Errorf("Type = %q, want %q (FGA tuples key on user-typed subjects)", p.Type, "user")
 	}
-	if p.ID != "system:vpc-reconciler" {
-		t.Errorf("ID = %q, want %q", p.ID, "system:vpc-reconciler")
+	if p.ID != "system.vpc-reconciler" {
+		t.Errorf("ID = %q, want %q", p.ID, "system.vpc-reconciler")
 	}
 	if p.DisplayName != "vpc-reconciler" {
 		t.Errorf("DisplayName = %q, want %q", p.DisplayName, "vpc-reconciler")
+	}
+}
+
+// TestSystemPrincipalFor_SurvivesFGASubjectSanitizer — the ID produced by
+// SystemPrincipalFor is the officially-recommended identity for worker/reconciler
+// peer-calls; it MUST survive the receiving-side FGA subject-sanitizer
+// (authz.validSubjectID via authz.FormatSubject). If its separator is an
+// FGA-reserved char (':'/'#'/'@'/whitespace), FormatSubject collapses it to
+// "user:unknown" (every distinct worker fused into one FGA subject) and the
+// per-RPC subject-extractor rejects it as anonymous → fail-closed deny even under
+// break-glass. Locks the observable round-trip, not just the raw string.
+func TestSystemPrincipalFor_SurvivesFGASubjectSanitizer(t *testing.T) {
+	p := auth.SystemPrincipalFor("vpc", "reconciler")
+
+	subj := authz.FormatSubject(p.Type, p.ID)
+	if subj == "user:unknown" {
+		t.Fatalf("FormatSubject(%q,%q) collapsed to %q — worker identity does not survive the FGA subject-sanitizer", p.Type, p.ID, subj)
+	}
+	if want := "user:" + p.ID; subj != want {
+		t.Errorf("FormatSubject = %q, want %q (id must pass through unmodified)", subj, want)
+	}
+
+	// Two distinct workers must map to two distinct FGA subjects (not fused).
+	other := auth.SystemPrincipalFor("compute", "expirer")
+	otherSubj := authz.FormatSubject(other.Type, other.ID)
+	if subj == otherSubj {
+		t.Errorf("distinct workers fused into same subject %q — every system worker collapses into one FGA subject", subj)
+	}
+	if otherSubj == "user:unknown" {
+		t.Errorf("FormatSubject(%q,%q) collapsed to %q", other.Type, other.ID, otherSubj)
 	}
 }
 

@@ -105,17 +105,23 @@ func PropagateOutgoing(ctx context.Context) context.Context {
 //
 // Produces:
 //
-//	Principal{Type: "user", ID: "system:<service>-<role>", DisplayName: "<service>-<role>"}
+//	Principal{Type: "user", ID: "system.<service>-<role>", DisplayName: "<service>-<role>"}
 //
 // "user" type (not "system") because FGA tuples and audit fields key on
-// user-typed subjects; the `system:` prefix in the ID is the discriminator.
+// user-typed subjects; the `system.` prefix in the ID is the discriminator.
+//
+// The separator is '.' (NOT ':') deliberately: ':' is an FGA-reserved char
+// (type:id boundary) rejected by the receiving-side subject-sanitizer
+// (authz.validSubjectID / FormatSubject). A ':' here would make every worker
+// collapse to "user:unknown" and be denied fail-closed as anonymous. '.' passes
+// the sanitizer, keeping each worker a distinct, attributable FGA subject.
 func SystemPrincipalFor(service, role string) operations.Principal {
 	if service == "" || role == "" {
 		return operations.SystemPrincipal()
 	}
 	return operations.Principal{
 		Type:        "user",
-		ID:          "system:" + service + "-" + role,
+		ID:          "system." + service + "-" + role,
 		DisplayName: service + "-" + role,
 	}
 }
