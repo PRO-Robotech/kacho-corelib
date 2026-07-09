@@ -77,48 +77,89 @@ func (li *ListenInvalidator) Run(ctx context.Context) error {
 		}()
 	}
 
-	backoff := 1 * time.Second
-	const maxBackoff = 30 * time.Second
+	return li.reconnectLoop(ctx, logger, li.runOnce, sleepFor)
+}
 
+const (
+	initialReconnectBackoff = 1 * time.Second
+	maxReconnectBackoff     = 30 * time.Second
+)
+
+// reconnectLoop drives session (one connect+serve cycle) with exponential
+// reconnect backoff. session reports whether it established the LISTEN
+// subscription (connected) before returning. A connected session that later
+// dropped resets the backoff to initialReconnectBackoff so a long-lived healthy
+// subscription reconnects promptly instead of at the ratcheted
+// maxReconnectBackoff cap (otherwise a handful of transient drops over the
+// process lifetime pin the backoff at the cap and every subsequent brief blip is
+// served up to maxReconnectBackoff late with missed subject-revoke NOTIFYs).
+//
+// sleep is injected so tests observe the requested wait deterministically; it
+// returns false if ctx ended during the wait.
+func (li *ListenInvalidator) reconnectLoop(
+	ctx context.Context,
+	logger *slog.Logger,
+	session func(context.Context, *slog.Logger) (bool, error),
+	sleep func(context.Context, time.Duration) bool,
+) error {
+	backoff := initialReconnectBackoff
 	for {
-		err := li.runOnce(ctx, logger)
+		connected, err := session(ctx, logger)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil
+		}
+		if connected {
+			// Healthy session served NOTIFYs then dropped — reset the cycle so the
+			// next reconnect is prompt. Missed NOTIFYs during the disconnect window
+			// are already covered by the conservative invalidateAll below plus the
+			// periodic full-clear.
+			backoff = initialReconnectBackoff
 		}
 		if err != nil {
 			logger.Warn("authz_listen_conn_drop", slog.String("err", err.Error()), slog.Duration("backoff", backoff))
 			// Conservative — invalidate все, чтобы не пропустить NOTIFY.
 			li.invalidateAll()
 		}
-		select {
-		case <-ctx.Done():
+		if !sleep(ctx, backoff) {
 			return nil
-		case <-time.After(backoff):
 		}
 		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
+		if backoff > maxReconnectBackoff {
+			backoff = maxReconnectBackoff
 		}
 	}
 }
 
-func (li *ListenInvalidator) runOnce(ctx context.Context, logger *slog.Logger) error {
+// sleepFor waits for d or until ctx is done. Returns false if ctx ended first.
+func sleepFor(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
+// runOnce runs one connect+LISTEN+serve cycle. The bool reports whether the
+// subscription was established (LISTEN succeeded) before the returned error — the
+// reconnect loop uses it to reset the backoff after a healthy session.
+func (li *ListenInvalidator) runOnce(ctx context.Context, logger *slog.Logger) (bool, error) {
 	conn, err := pgx.Connect(ctx, li.ConnString)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() { _ = conn.Close(ctx) }()
 
 	_, err = conn.Exec(ctx, "LISTEN "+li.Channel)
 	if err != nil {
-		return err
+		return false, err
 	}
 	logger.Info("authz_listen_connected")
 
 	for {
 		notif, err := conn.WaitForNotification(ctx)
 		if err != nil {
-			return err
+			return true, err
 		}
 		if notif == nil {
 			continue
