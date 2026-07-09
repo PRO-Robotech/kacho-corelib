@@ -1,0 +1,167 @@
+---
+id: operations
+sidebar_position: 7
+title: operations
+---
+
+# operations
+
+Пакет `operations` решает центральную для платформы задачу: **как выполнять мутации
+асинхронно, но давать клиенту немедленный, отслеживаемый ответ**. В Kachō любая мутация
+(`Create`/`Update`/`Delete`) возвращает не ресурс синхронно, а `Operation` — запись о
+запущенной работе. Клиент получает её сразу и поллит `OperationService.Get(id)` до
+`done=true`. `operations` даёт всё для этого паттерна: durable-таблицу операций,
+пул фоновых worker'ов с ограничением параллелизма и per-op таймаутом, перенос principal в
+фон и reconciler, восстанавливающий «зависшие» операции после рестарта процесса.
+
+```go
+op, _ := operations.NewFromContext(ctx, ids.PrefixOperationVPC, "Create network "+n.Name, meta)
+_ = opRepo.CreateWithPrincipal(ctx, op, operations.PrincipalFromContext(ctx))
+operations.Run(ctx, opRepo, op.ID, func(ctx context.Context) (*anypb.Any, error) {
+    return anypb.New(&vpcpb.Network{Id: n.ID /* … */})
+})
+return operationToProto(op), nil // синхронный ответ handler'а
+```
+
+## Модель Operation
+
+<table>
+  <thead><tr><th>Поле</th><th>Смысл</th></tr></thead>
+  <tbody>
+    <tr><td><code>ID</code></td><td>id операции (<code>ids.NewID(&lt;op-prefix&gt;)</code>, напр. <code>enp…</code> для VPC)</td></tr>
+    <tr><td><code>Description</code></td><td>Человекочитаемое описание («Create network web»)</td></tr>
+    <tr><td><code>CreatedAt</code> / <code>ModifiedAt</code></td><td>Временные метки</td></tr>
+    <tr><td><code>Done</code></td><td><code>false</code> пока идёт; <code>true</code> — терминальное состояние</td></tr>
+    <tr><td><code>Metadata *anypb.Any</code></td><td>Типизированные метаданные операции (напр. <code>CreateNetworkMetadata</code>)</td></tr>
+    <tr><td><code>Response *anypb.Any</code></td><td>Результат при успехе (сам ресурс)</td></tr>
+    <tr><td><code>Error *status.Status</code></td><td>Ошибка при провале (<code>google.rpc.Status</code>)</td></tr>
+    <tr><td><code>Principal</code></td><td>Кто инициировал операцию (iam-resolved); без auth — <code>SystemPrincipal()</code></td></tr>
+  </tbody>
+</table>
+
+## Конструкторы и helpers
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>New(domainPrefix, description, metadata proto.Message) (Operation, error)</code></td><td>Создаёт операцию: <code>id = ids.NewID(domainPrefix)</code>, упаковывает metadata в <code>Any</code></td></tr>
+    <tr><td><code>NewFromContext(ctx, domainPrefix, description, metadata)</code></td><td>То же + берёт principal из ctx (<code>PrincipalFromContext</code>)</td></tr>
+    <tr><td><code>MetadataFor[T proto.Message]&#40;op *Operation) (T, error)</code></td><td>Generic unmarshal <code>Any</code> → типизированное proto-сообщение</td></tr>
+    <tr><td><code>Run(callerCtx, repo, opID, fn func(ctx) (*anypb.Any, error))</code></td><td>Запускает фоновую работу: на success/error пишет <code>MarkDone</code>/<code>MarkError</code></td></tr>
+    <tr><td><code>RunWithWorker(w, callerCtx, repo, opID, fn)</code></td><td>То же через именованный worker (для graceful shutdown)</td></tr>
+  </tbody>
+</table>
+
+## Repo — durable-таблица операций
+
+`Repo` — порт над таблицей `<schema>.operations`. Pg-реализация — `NewRepo(pool, schema)`.
+
+<table>
+  <thead><tr><th>Метод</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>Create</code> / <code>CreateWithPrincipal</code></td><td>Записать новую операцию (<code>done=false</code>); второй — с явным principal'ом</td></tr>
+    <tr><td><code>Get</code></td><td>Операция по id (<code>ErrNotFound</code>, если нет) — <strong>unscoped</strong></td></tr>
+    <tr><td><code>List</code></td><td>Список с курсорной пагинацией (<code>ListFilter</code>: по account, по resource-id)</td></tr>
+    <tr><td><code>MarkDone</code> / <code>MarkError</code></td><td>Терминализация: записать response или error; идемпотентны (CAS on <code>done</code>)</td></tr>
+    <tr><td><code>Cancel</code></td><td>Терминализация со статусом <code>CANCELLED</code> — <strong>unscoped</strong></td></tr>
+  </tbody>
+</table>
+
+:::warning IDOR: tenant-facing Get/Cancel — только ownership-scoped
+`Get` и `Cancel` **не** несут ownership-предиката, а id операции публичен и перечислим.
+Отдавать их результат tenant-facing напрямую нельзя — иначе tenant A прочитает или
+отменит операцию tenant'а B (CWE-639). Для `OperationService.Get`/`Cancel` используйте
+ownership-scoped обёртку: `operations.AsOwned(repo)` → `OwnedOperationRepo.GetOwned` /
+`CancelOwned` (owner берётся из principal через `OwnerFromPrincipal`). Unscoped `Get`/
+`Cancel` — только для доверенных internal-путей (reconciler, worker), авторизованных
+иначе.
+:::
+
+## Principal в фоне
+
+Фоновый worker выполняется в **detached** context — без cancel/deadline вызывающего
+запроса, но с сохранённым trace. Principal переносится явно.
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>Principal&#123; Type, ID, DisplayName &#125;</code></td><td>Кто инициировал (iam-resolved)</td></tr>
+    <tr><td><code>SystemPrincipal()</code></td><td>Системный principal для bootstrap / фоновых job'ов</td></tr>
+    <tr><td><code>WithPrincipal(ctx, p)</code> / <code>PrincipalFromContext(ctx)</code></td><td>Положить / извлечь principal (auth-interceptor кладёт, use-case читает)</td></tr>
+    <tr><td><code>PrincipalFromContextOK(ctx) (Principal, bool)</code></td><td>+ признак, был ли principal установлен явно</td></tr>
+    <tr><td><code>WithoutPrincipal(ctx)</code></td><td>Defense-in-depth scrub носителя (чтобы подделанный не просочился)</td></tr>
+  </tbody>
+</table>
+
+:::warning Worker, зовущий peer-сервис, обязан инжектить principal
+Если фоновая `fn` вызывает iam/vpc/geo, оберните исходящий ctx через
+[`auth.PropagateOutgoing`](/packages/authz) с principal'ом операции. Иначе вызов уйдёт
+анонимным и упрётся в authz (`PermissionDenied`), а мутация откатится с невнятным
+«internal database error». Detached фоновые циклы (reconciler, drainer) используют явный
+`SystemPrincipal()` или конкретный SA-principal.
+:::
+
+## Worker и глобальный registry
+
+Фоновую обработку ведёт `Worker` — пул горутин с ограничением параллелизма, backpressure
+и per-op таймаутом. Есть именованный worker (`NewWorker(opts…)`) и глобальный default
+(`Run` использует его).
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>NewWorker(opts ...WorkerOption) *Worker</code></td><td>Создать worker</td></tr>
+    <tr><td><code>WithMaxInflight(n)</code> · <code>WithMaxBacklog(n)</code> · <code>WithOperationTimeout(d)</code> · <code>WithRecorder(r)</code> · <code>WithLogger(l)</code></td><td>Опции: параллелизм, очередь, per-op таймаут, метрики, лог</td></tr>
+    <tr><td><code>(*Worker).Start()</code> · <code>Wait(ctx)</code> · <code>Stop()</code> · <code>Active()</code> · <code>Ready()</code></td><td>Жизненный цикл и наблюдение</td></tr>
+    <tr><td><code>ConfigureDefault(opts…)</code> · <code>Start()</code> · <code>Wait(ctx)</code> · <code>Active()</code></td><td>Настройка/жизненный цикл глобального default-worker'а</td></tr>
+  </tbody>
+</table>
+
+## Reconciler — восстановление после рестарта
+
+Если процесс упал, пока операция была `done=false`, её нужно довести до терминального
+состояния. `Reconciler` периодически «подметает» зависшие операции и разрешает их через
+доменный `Resolver`.
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>NewReconciler(pool, resolver, cfg, opts…)</code></td><td>Создать reconciler</td></tr>
+    <tr><td><code>Resolver</code> (интерфейс)</td><td>Доменная логика: как разрешить зависшую операцию (успех/ошибка)</td></tr>
+    <tr><td><code>(*Reconciler).Sweep(ctx) (int, error)</code> · <code>RecoverAll(ctx)</code> · <code>Run(ctx)</code></td><td>Один проход / полный прогон / фоновый цикл</td></tr>
+    <tr><td><code>ClaimForExecution(ctx, id) (live bool, error)</code></td><td>CAS-guard: worker пропускает <code>fn</code>, если строку уже разрешил reconciler/Cancel (защита от phantom-ресурса)</td></tr>
+  </tbody>
+</table>
+
+Метрики — через интерфейс `Recorder` (`NopRecorder` по умолчанию, `MemRecorder` для
+тестов): счётчики terminal-write retry/failure, inflight, recovered orphans, reconcile-
+прогоны.
+
+## Sentinels
+
+<table>
+  <thead><tr><th>Sentinel</th><th>Когда</th></tr></thead>
+  <tbody>
+    <tr><td><code>ErrNotFound</code></td><td>Операции с таким id нет</td></tr>
+    <tr><td><code>ErrAlreadyDone</code></td><td>Операция уже терминализована (идемпотентный no-op)</td></tr>
+    <tr><td><code>ErrWorkerStarted</code></td><td>Попытка сконфигурировать worker после <code>Start()</code></td></tr>
+  </tbody>
+</table>
+
+## Корнер-кейсы и лучшие практики
+
+- **Handler возвращает `Operation` синхронно** и не ждёт `fn`. Ждать — задача клиента
+  (поллинг) или тестов (детерминированный `AwaitOpDone`, не `time.Sleep`).
+- **`MarkDone`/`MarkError` идемпотентны** (CAS on `done`): повторная терминализация —
+  no-op, гонка Cancel-vs-MarkDone разрешается ровно одним победителем.
+- **Каждый сервис владеет своей копией таблицы `operations`.** Миграции `migrations/common`
+  не применяются автоматически; при изменении write-path по колонке миграции сервисов
+  landятся **раньше** (топосорт build-графа), иначе `undefined_column` fleet-wide.
+- **Op-префикс стабилен per-домен** — см. [ids](/packages/ids); opsproxy маршрутизирует
+  `Operation.Get` по первым 3 символам.
+
+## Импорты и зависимости
+
+`corelib/baggage`, `corelib/ids`, `pgx/v5` / `pgxpool`, `genproto/googleapis/rpc/status`,
+`grpc/codes` / `grpc/status`, `protobuf/proto` / `anypb`. Потребляется use-case- и
+handler-слоем всех доменов.

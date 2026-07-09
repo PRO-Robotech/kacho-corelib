@@ -1,0 +1,103 @@
+---
+id: ids
+sidebar_position: 2
+title: ids
+---
+
+# ids
+
+Пакет `ids` решает одну задачу: **как назвать ресурс, чтобы имя было коротким,
+непрозрачным, уникальным и самоописательным по типу**. Каждый ресурс и каждая операция
+платформы получают id вида `<3-char prefix><17-char crockford-base32>` — 20 символов. По
+первым трём символам api-gateway понимает, к какому домену маршрутизировать запрос, а
+id-парсеры — какой это тип ресурса. Тело — 85 бит энтропии от `crypto/rand`, чего с
+запасом хватает против коллизий.
+
+```
+net0j8x4k2m9p7q3r      ← Network      (prefix "net")
+sub1a2b3c4d5e6f7g      ← Subnet       (prefix "sub")
+enpz9y8x7w6v5u4t3      ← VPC Operation (prefix "enp")
+```
+
+## Формат id
+
+<table>
+  <thead><tr><th>Часть</th><th>Длина</th><th>Содержимое</th></tr></thead>
+  <tbody>
+    <tr><td>Префикс</td><td>3 символа</td><td>Домен + тип ресурса (константа <code>Prefix*</code>)</td></tr>
+    <tr><td>Тело</td><td>17 символов</td><td>Crockford base32 (lowercase, без <code>i l o u</code>) от <code>crypto/rand</code></td></tr>
+  </tbody>
+</table>
+
+Алфавит — `0123456789abcdefghjkmnpqrstvwxyz`. Тело — 17 символов × 5 бит = 85 бит
+энтропии, читаемых из 11 случайных байт.
+
+## Exported API
+
+<table>
+  <thead><tr><th>Функция</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>NewID(prefix string) string</code></td><td>Возвращает <code>&lt;prefix&gt;&lt;17-char base32&gt;</code>. <code>prefix</code> обязан быть ровно 3 символа — иначе <strong>panic</strong> (programmer error: префикс приходит из константы)</td></tr>
+    <tr><td><code>IsValid(id, prefix string) bool</code></td><td>Проверяет синтаксис: длина 20, заданный префикс, тело — валидная base32. Не проверяет «качество» энтропии</td></tr>
+    <tr><td><code>HasKnownPrefix(id string) bool</code></td><td><code>true</code>, если id корректной формы и его 3-символьный префикс входит в множество объявленных префиксов проекта. Для acceptance в gateway/proxy без знания конкретного типа</td></tr>
+    <tr><td><code>KnownPrefixes() map[string]struct{}</code></td><td>Копия множества известных префиксов. Потребители (напр. <code>validate</code>) строят свой набор поверх, не дублируя литералы</td></tr>
+    <tr><td><code>NewUID() string</code> <em>(deprecated)</em></td><td>Opaque 20-символьная строка без доменного префикса (sentinel <code>rev</code>). Оставлен для legacy resource-version-полей; для id ресурсов и операций всегда <code>NewID</code></td></tr>
+  </tbody>
+</table>
+
+## Префиксы (константы)
+
+Префикс кодирует **домен и тип ресурса**. Каждый ресурс получает свой 3-символьный
+префикс. `Operation.id` использует отдельный, стабильный **per-домен** префикс — по нему
+opsproxy в api-gateway маршрутизирует `Operation.Get`.
+
+<table>
+  <thead><tr><th>Домен</th><th>Константа → значение</th></tr></thead>
+  <tbody>
+    <tr><td>VPC</td><td><code>PrefixNetwork</code>=net · <code>PrefixSubnet</code>=sub · <code>PrefixAddress</code>=adr · <code>PrefixRouteTable</code>=rtb · <code>PrefixSecurityGroup</code>=sgr · <code>PrefixGateway</code>=gtw · <code>PrefixNetworkInterface</code>=nic · <code>PrefixAddressPool</code>=apl · <code>PrefixAnycastPool</code>=aap</td></tr>
+    <tr><td>Compute</td><td><code>PrefixInstance</code>/<code>PrefixDisk</code>=epd · <code>PrefixImage</code>/<code>PrefixSnapshot</code>=fd8</td></tr>
+    <tr><td>NLB</td><td><code>PrefixLoadBalancer</code>=nlb · <code>PrefixListener</code>=lst · <code>PrefixTargetGroup</code>=tgr</td></tr>
+    <tr><td>Apps</td><td><code>PrefixApplication</code>=app</td></tr>
+    <tr><td>Registry</td><td><code>PrefixRegistry</code>=reg · <code>PrefixOperationReg</code>=rop</td></tr>
+    <tr><td>IAM <em>(строковые, в validate)</em></td><td>acc · prj · usr · sva · grp · rol · acb · iop · uoc</td></tr>
+    <tr><td>Operation (per-домен)</td><td><code>PrefixOperationVPC</code>=enp · <code>PrefixOperationCompute</code>=epd · <code>PrefixOperationNLB</code>=nlb · <code>PrefixOperationApps</code>=aop · <code>PrefixOperationReg</code>=rop</td></tr>
+  </tbody>
+</table>
+
+:::note Operation-префикс декаплен от ресурса
+`PrefixOperationVPC` зафиксирован как `enp` — он **не** совпадает с `PrefixNetwork` (net) и
+не меняется, даже если у ресурсов свои префиксы. Причина: opsproxy маршрутизирует
+`Operation.Get` по первым 3 символам id, поэтому op-префикс обязан быть стабильным
+per-домен. IAM-префиксы (`acc`/`prj`/…) объявлены в самом сервисе iam (downstream в
+build-графе) и добавлены в известный набор литералами, чтобы `ids` оставался единым
+источником истины для `HasKnownPrefix`.
+:::
+
+## Использование
+
+```go
+// Сгенерировать id ресурса и операции
+netID := ids.NewID(ids.PrefixNetwork)
+opID  := ids.NewID(ids.PrefixOperationVPC)
+
+// Проверить вход извне (gateway / handler)
+if !ids.HasKnownPrefix(userInput) {
+    return errors.InvalidArgument().AddFieldViolation("id", "unknown resource id").Err()
+}
+```
+
+## Корнер-кейсы и лучшие практики
+
+- **Префикс — всегда из константы.** `NewID` паникует на префиксе ≠ 3 символа. Это
+  осознанно: неверная длина — ошибка программиста, а не рантайм-вход.
+- **Не парсите тело id.** Оно непрозрачно; извлекать смысл можно только из префикса.
+- **Валидация malformed id на входе** — первым стейтментом RPC через
+  [`validate.ResourceID`](/packages/validate) (даёт `InvalidArgument` со стабильным
+  текстом), а не «сырым» `IsValid`.
+- **`NewUID` не для id ресурсов.** Он без доменного префикса и не маршрутизируется —
+  только для legacy resource-version-полей.
+
+## Импорты и зависимости
+
+Только stdlib: `crypto/rand`, `encoding/binary`, `strings`. Ни от чего в проекте не
+зависит — это базовый пакет, потребляемый почти всеми.

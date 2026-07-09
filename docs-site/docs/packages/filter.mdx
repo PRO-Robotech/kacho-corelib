@@ -1,0 +1,88 @@
+---
+id: filter
+sidebar_position: 5
+title: filter · selector
+---
+
+# filter · selector
+
+Эти два пакета решают задачу **безопасного построения SQL для List-RPC из входа
+клиента**. `List` в Kachō принимает необязательный `filter` (например,
+`name = "web"`) и курсорную пагинацию. Наивная сборка `WHERE` конкатенацией строк — это
+SQL-инъекция; `filter` и `selector` строят параметризованный запрос, где значения уходят
+только через pgx-плейсхолдеры `$N`, а имена полей проверяются по whitelist.
+
+## filter — разбор filter-выражения
+
+`filter` парсит текст фильтра в AST и рендерит его в `WHERE`-условие с плейсхолдерами.
+Whitelist допустимых полей задаёт handler — поле вне списка отвергается на разборе.
+
+<table>
+  <thead><tr><th>Символ</th><th>Сигнатура / назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>Parse</code></td><td><code>Parse(input string, allowedFields []string) (*FilterAST, error)</code> — парсит и валидирует, что все поля входят в <code>allowedFields</code></td></tr>
+    <tr><td><code>FilterAST.ToSQL</code></td><td><code>(*FilterAST).ToSQL(argStartIdx int) (clause string, args []any)</code> — рендер в pgx-плейсхолдеры начиная с <code>$argStartIdx</code></td></tr>
+    <tr><td><code>ParseError</code></td><td>Позиционная ошибка разбора (offset + сообщение); конвертируется в <code>InvalidArgument</code></td></tr>
+  </tbody>
+</table>
+
+Поддерживаемая грамматика (подмножество): равенство `field = "x"` / `field != "x"`,
+`AND`/`OR`, `field IN ("a","b")`, label-путь `labels.env = "prod"`.
+
+```go
+ast, err := filter.Parse(req.GetFilter(), []string{"name", "labels.env", "status"})
+if err != nil {
+    return nil, errors.InvalidArgument().AddFieldViolation("filter", err.Error()).Err()
+}
+where, args := ast.ToSQL(1) // начиная с $1
+rows, _ := pool.Query(ctx, "SELECT … FROM networks WHERE "+where, args...)
+```
+
+:::warning Whitelist полей обязателен
+`allowedFields` — граница безопасности: имя поля попадает в SQL, значения — только через
+`$N`. Тест пакета проверяет, что «злонамеренное» имя поля вне whitelist отвергается, а
+легитимное имя переносится как есть. Никогда не передавайте в `Parse` пустой или
+пользовательский список полей.
+:::
+
+## selector — pagination и seek-курсор
+
+`selector` — структурный (не текстовый) builder: собирает `WHERE`/`ORDER BY`/`LIMIT` из
+типизированных предикатов и курсорной пагинации. Полезен там, где фильтр формируется
+кодом, а не приходит строкой от клиента.
+
+<table>
+  <thead><tr><th>Тип / функция</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>Selector&#123; Field, Op, Value &#125;</code></td><td>Единичный предикат</td></tr>
+    <tr><td><code>PageToken</code></td><td>Opaque base64-курсор (<code>json.Marshal</code> + base64)</td></tr>
+    <tr><td><code>BuildResult&#123; Where, Args, OrderBy, Limit &#125;</code></td><td>Готовые части запроса</td></tr>
+    <tr><td><code>Build(selectors) (BuildResult, error)</code></td><td>Сборка с плейсхолдеров <code>$1</code></td></tr>
+    <tr><td><code>BuildFrom(selectors, startParam) (BuildResult, error)</code></td><td>Продолжить нумерацию с <code>$startParam+1</code></td></tr>
+    <tr><td><code>BuildPageClause(token, startParam) (clause, args)</code></td><td>Seek-пагинация: <code>WHERE (key,id) &gt; ($N,$N+1)</code></td></tr>
+  </tbody>
+</table>
+
+Курсорная пагинация в Kachō — по паре `(created_at, id)` с `ORDER BY ASC`; `page_token`
+непрозрачен для клиента (передаётся как есть). Валидация `page_size` — через
+[`validate.PageSize`](/packages/validate) (0 → 50, максимум 1000).
+
+:::note Статус selector
+`filter` активно используется List-хэндлерами. `selector` покрыт тестами и готов к
+использованию как единый builder pagination + фильтров; часть сервисов пока строит
+List-запросы ad-hoc — плановая унификация переводит их на `selector`.
+:::
+
+## Корнер-кейсы и лучшие практики
+
+- **Ошибку `Parse` — в `InvalidArgument`** с полем `filter` и текстом `ParseError`
+  (клиент увидит позицию и причину).
+- **Согласуйте `argStartIdx`.** Если в запросе уже есть `$1..$k` (например, `project_id`),
+  вызывайте `ToSQL(k+1)` / `BuildFrom(..., k)`, чтобы плейсхолдеры не пересеклись.
+- **Не расширяйте грамматику в сервисе.** Нужен новый оператор — добавляйте в `filter`,
+  чтобы все List-хэндлеры вели себя одинаково.
+
+## Импорты и зависимости
+
+`filter` — только stdlib (`fmt`, `strings`). `selector` — `encoding/json`, `fmt`,
+`strings`. Оба потребляются List-хэндлерами сервисов.

@@ -1,0 +1,154 @@
+---
+id: getting-started
+sidebar_position: 2
+title: Быстрый старт
+---
+
+# Быстрый старт
+
+Эта страница проводит от нуля до первого использования библиотеки: подключить модуль,
+сгенерировать id ресурса, вернуть стабильную ошибку, открыть пул Postgres и запустить
+фоновую long-running operation. corelib — библиотека, поэтому «запуска сервиса» тут нет;
+код вызывается из composition root вашего сервиса (`cmd/<svc>/main.go`).
+
+:::info Что нужно
+Go-тулчейн **1.25+**. Для пакетов данных (`db`, `operations`, `outbox`) — доступный
+PostgreSQL 16+. Integration-тесты самой библиотеки поднимают контейнеры (testcontainers),
+поэтому им нужен Docker; unit-пакеты гоняются без него.
+:::
+
+## 1. Подключить модуль
+
+```bash
+go get github.com/PRO-Robotech/kacho-corelib@latest
+```
+
+Внутри монорепо-воркспейса зависимость подключается через `go.work` (локальный
+override), а в опубликованной сборке — по версии с GitHub. Импортируются отдельные
+пакеты, не «весь corelib»:
+
+```go
+import (
+    "github.com/PRO-Robotech/kacho-corelib/ids"
+    "github.com/PRO-Robotech/kacho-corelib/errors"
+    "github.com/PRO-Robotech/kacho-corelib/validate"
+    "github.com/PRO-Robotech/kacho-corelib/operations"
+)
+```
+
+## 2. Сгенерировать id ресурса
+
+Каждый ресурс платформы получает короткий непрозрачный id формата
+`<3-char prefix><17-char crockford-base32>` (20 символов). Префикс кодирует домен и тип
+ресурса — по нему api-gateway маршрутизирует запросы к нужному backend.
+
+```go
+netID := ids.NewID(ids.PrefixNetwork) // "net" + 17 символов, напр. "net0j8x…"
+opID  := ids.NewID(ids.PrefixOperationVPC)
+
+if !ids.IsValid(netID, ids.PrefixNetwork) {
+    // невозможно для только что сгенерированного id — проверка для входов извне
+}
+```
+
+Источник энтропии — `crypto/rand`. Полный список префиксов и правила — на странице
+пакета [ids](/packages/ids).
+
+## 3. Провалидировать вход и вернуть стабильную ошибку
+
+Валидаторы `validate` возвращают уже готовую gRPC-ошибку `InvalidArgument` со
+структурированными деталями. Builder `errors` собирает остальные коды со стабильными
+текстами (тексты — часть контракта Kachō).
+
+```go
+if err := validate.NameVPC("name", req.GetName()); err != nil {
+    return nil, err // InvalidArgument + BadRequest.FieldViolation
+}
+
+n, err := repo.GetNetwork(ctx, req.GetId())
+if errors.Is(err, pgx.ErrNoRows) {
+    return nil, errors.NotFound("Network", req.GetId()).Err() // «Network '<id>' was not found»
+}
+```
+
+Коды, тексты и детали — на странице пакетов [errors](/packages/errors) и
+[validate](/packages/validate).
+
+## 4. Открыть пул Postgres и работать в транзакции
+
+`db.NewPool` — единственная точка создания `pgxpool.Pool`: fail-fast `Ping`,
+`statement_timeout`, регистрация трассировки. `Transactor.InTx` группирует мутацию и
+outbox-эмит в одной транзакции (rollback на ошибке или панике).
+
+```go
+pool, err := db.NewPool(ctx, dsn) // dsn: postgres://…?application_name=kacho-vpc
+if err != nil {
+    return err
+}
+defer pool.Close()
+
+tx := db.NewTransactor(pool)
+err = tx.InTx(ctx, func(tx pgx.Tx) error {
+    if err := repo.CreateNetwork(ctx, tx, n); err != nil {
+        return err
+    }
+    // событие пишется той же транзакцией — атомарность гарантирована
+    return outbox.Emit(ctx, tx, "networks", "network", n.ID, "network.created", payload)
+})
+```
+
+Подробнее — [db](/packages/db) и [outbox](/packages/outbox).
+
+## 5. Запустить long-running operation
+
+Мутации в Kachō асинхронны: handler сразу создаёт строку `Operation`, отдаёт её
+клиенту синхронно, а работу выполняет фоновый worker. Клиент поллит
+`OperationService.Get(id)` до `done=true`.
+
+```go
+op, err := operations.NewFromContext(ctx, ids.PrefixOperationVPC,
+    "Create network "+n.Name, &vpcpb.CreateNetworkMetadata{NetworkId: n.ID})
+if err != nil {
+    return nil, err
+}
+if err := opRepo.CreateWithPrincipal(ctx, op, operations.PrincipalFromContext(ctx)); err != nil {
+    return nil, err
+}
+
+// фоновая работа; worker автономен от request-ctx, но наследует trace/principal
+operations.Run(ctx, opRepo, op.ID, func(ctx context.Context) (*anypb.Any, error) {
+    if err := doCreateNetwork(ctx, n); err != nil {
+        return nil, err // маппится в Operation.error (google.rpc.Status)
+    }
+    return anypb.New(&vpcpb.Network{Id: n.ID /* … */})
+})
+
+return operationToProto(op), nil // синхронный ответ handler'а
+```
+
+:::warning Worker наследует principal, а не request-ctx
+Фоновый worker получает **detached** context (без cancel/deadline вызывающего запроса),
+но с сохранённым trace и principal. Если worker зовёт peer-сервис (iam/vpc/geo), передайте
+principal явно — иначе вызов уйдёт анонимным и упрётся в authz. Механика — на странице
+[operations](/packages/operations).
+:::
+
+## 6. Собрать и проверить
+
+Библиотека собирается и тестируется стандартными Make-целями:
+
+```bash
+make test     # go test ./... -race -cover (пакеты данных требуют Docker)
+make lint     # golangci-lint
+```
+
+Unit-пакеты (`ids`, `validate`, `errors`, `filter`, `safeconv`, `backoff`, `retry`,
+`shutdown`, `baggage`) гоняются без Docker. Integration-пакеты (`db`, `operations`,
+`outbox`, `grpcsrv`) поднимают контейнеры — под нагрузкой запускайте `go test -p 1`.
+
+## Дальше
+
+- Карта библиотеки и как пакеты сочетаются — [Обзор пакетов](/packages/overview).
+- Как corelib встроен в чистую архитектуру сервиса — [Архитектура](/architecture/overview).
+- Осознанные проектные решения (fail-closed mTLS, LRO-семантика, outbox) —
+  [Проектные решения](/architecture/design-decisions).

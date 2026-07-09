@@ -1,0 +1,81 @@
+---
+id: grpcclient
+sidebar_position: 10
+title: grpcclient
+---
+
+# grpcclient
+
+Пакет `grpcclient` — парная к [`grpcsrv`](/packages/grpcsrv) сторона: **безопасная
+сборка gRPC-клиента для вызова peer-сервиса**. Когда один сервис Kachō зовёт другой
+(например, VPC валидирует `zone_id` через Geo, или любой сервис проверяет проект в IAM),
+соединение обязано быть mTLS с проверкой server-cert, а keepalive — достаточно
+агрессивным, чтобы поймать half-open соединение до следующего всплеска трафика.
+`grpcclient` даёт это одной точкой конфигурации.
+
+## mTLS-клиент
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>TLSClient&#123; Enable, CertFile, KeyFile, CAFiles, ServerName &#125;</code></td><td>Конфигурация mTLS клиента; <code>ServerName</code> сверяется с SAN server-cert</td></tr>
+    <tr><td><code>TLSClientCreds(cfg TLSClient) (grpc.DialOption, error)</code></td><td><code>DialOption</code> с client-cert и проверкой server-cert</td></tr>
+    <tr><td><code>TLSClientTransportCreds(cfg TLSClient) (credentials.TransportCredentials, error)</code></td><td>Тот же TLS как <code>TransportCredentials</code> (для нестандартной сборки dial)</td></tr>
+  </tbody>
+</table>
+
+:::warning Secure-by-default, fail-closed
+`Enable=true` с некорректными сертификатами → **ошибка** (соединение не устанавливается),
+а не тихий downgrade на plaintext. Insecure-dial возможен только при явном `Enable=false`
+(dev-путь). `ServerName` обязателен при mTLS — без сверки SAN клиент не удостоверится, что
+говорит с нужным сервисом.
+:::
+
+## Keepalive
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>KeepaliveParams(permitWithoutStream bool) keepalive.ClientParameters</code></td><td>Параметры: интервал ping 10s, ack-таймаут = треть интервала</td></tr>
+    <tr><td><code>KeepaliveDialOption(permitWithoutStream bool) grpc.DialOption</code></td><td>Готовый <code>DialOption</code> с этими параметрами</td></tr>
+    <tr><td><code>DefaultKeepaliveTime</code> / <code>DefaultKeepaliveTimeout</code></td><td>10s / треть от 10s — инвариант «таймаут = треть интервала»</td></tr>
+  </tbody>
+</table>
+
+Агрессивный 10-секундный ping выбран, чтобы поймать half-open соединение (idle-flow
+умирает быстрее 30s в кластерной сети) до того, как он уронит следующий запрос.
+
+## Использование
+
+```go
+creds, err := grpcclient.TLSClientCreds(grpcclient.TLSClient{
+    Enable:     true,
+    CertFile:   cfg.ClientCert,
+    KeyFile:    cfg.ClientKey,
+    CAFiles:    []string{cfg.CA},
+    ServerName: "kacho-geo",
+})
+if err != nil {
+    return err
+}
+conn, err := grpc.NewClient(cfg.GeoAddr, creds,
+    grpcclient.KeepaliveDialOption(true))
+```
+
+Исходящий principal для service→service добавляется отдельно —
+[`auth.PropagateOutgoing`](/packages/authz), а идемпотентные вызовы оборачиваются
+[`retry`](/packages/resilience).
+
+## Корнер-кейсы и лучшие практики
+
+- **Один client-conn на peer**, создаётся в composition root, переиспользуется (не
+  открывать соединение на каждый вызов).
+- **`permitWithoutStream=true`** для long-lived клиентов, которые могут простаивать между
+  запросами (ping идёт даже без активного стрима).
+- **Fail-closed для мутаций**: если peer недоступен, вызов вернёт `Unavailable` — сервис
+  обязан отдать клиенту `Unavailable`, а не «притвориться», что всё хорошо.
+
+## Импорты и зависимости
+
+`grpc`, `grpc/keepalive`, `grpc/credentials`. Потребляется clients-слоем сервисов; парная
+сторона — [grpcsrv](/packages/grpcsrv).

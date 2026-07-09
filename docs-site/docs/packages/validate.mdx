@@ -1,0 +1,100 @@
+---
+id: validate
+sidebar_position: 3
+title: validate
+---
+
+# validate
+
+Пакет `validate` решает задачу **единой валидации входных полей на границе сервиса**.
+Каждый RPC перед работой обязан проверить формат входа — имя, описание, labels,
+page-size, id ресурса — и вернуть понятную ошибку `INVALID_ARGUMENT`, если формат
+нарушен. `validate` собирает эти проверки в одном месте: все сервисы валидируют одинаково
+и возвращают одинаковые тексты. Каждый валидатор возвращает уже готовую gRPC-ошибку
+(через [`errors`](/packages/errors)) — не булев флаг.
+
+```go
+if err := validate.NameVPC("name", req.GetName()); err != nil {
+    return nil, err // InvalidArgument + BadRequest.FieldViolation
+}
+```
+
+## Валидаторы
+
+Все возвращают `error` (`nil` — если ок). Ни один не проверяет «is required» — пустоту
+проверяет caller отдельно, чтобы сообщение было точным.
+
+<table>
+  <thead><tr><th>Валидатор</th><th>Проверяет</th></tr></thead>
+  <tbody>
+    <tr><td><code>Name(field, value)</code></td><td>Strict-имя: <code>^[a-z]&#40;[-a-z0-9]&#123;0,61&#125;[a-z0-9]&#41;?$</code> (lowercase, цифры, дефисы; 1..63)</td></tr>
+    <tr><td><code>NameVPC(field, value)</code></td><td>Нестрогое VPC-имя: letters/digits/hyphens/underscore, заглавные и пустая строка допустимы; 0..63</td></tr>
+    <tr><td><code>NameCompute(field, value)</code></td><td>Как VPC, но только lowercase; пустая строка допустима</td></tr>
+    <tr><td><code>NameGateway(field, value)</code></td><td>Strict lowercase без underscore; пустая строка допустима</td></tr>
+    <tr><td><code>Description(field, value)</code></td><td>UTF-8, ≤ 256 символов</td></tr>
+    <tr><td><code>Labels(field, labels map[string]string)</code></td><td>≤ 64 пар; regex ключа; длина ключа/значения ≤ 63</td></tr>
+    <tr><td><code>PageSize(field, value int64) (int64, error)</code></td><td>Clamp + default: <code>0</code> → 50, максимум 1000</td></tr>
+    <tr><td><code>ResourceID(resourceType, expectedPrefix, id)</code></td><td>Формат id <code>&lt;prefix&gt;&lt;crockford-base32&gt;</code> (см. <a href="/packages/ids">ids</a>); пустая строка проходит</td></tr>
+    <tr><td><code>IPAddress(field, value)</code></td><td>IPv4/IPv6 через <code>net.ParseIP</code></td></tr>
+    <tr><td><code>UpdateMask(field, mask []string, known map[string]struct&#123;&#125;)</code></td><td>Update-mask дисциплина: unknown-путь → <code>InvalidArgument</code></td></tr>
+    <tr><td><code>ZoneId(field, value)</code>, <code>DhcpDomainName</code>, <code>DdosProvider</code>, <code>SmtpCapability</code></td><td>Доменные предикаты (топология, DHCP, DDoS-провайдер, SMTP-режим)</td></tr>
+  </tbody>
+</table>
+
+## Лимиты (константы)
+
+<table>
+  <thead><tr><th>Константа</th><th>Значение</th></tr></thead>
+  <tbody>
+    <tr><td><code>MaxNameLen</code></td><td>63</td></tr>
+    <tr><td><code>MaxDescriptionLen</code></td><td>256</td></tr>
+    <tr><td><code>MaxLabels</code></td><td>64</td></tr>
+    <tr><td><code>MaxLabelKeyLen</code> / <code>MaxLabelValueLen</code></td><td>63</td></tr>
+    <tr><td><code>DefaultPageSize</code></td><td>50</td></tr>
+    <tr><td><code>MaxPageSize</code></td><td>1000</td></tr>
+  </tbody>
+</table>
+
+## Дисциплина resource-id и расширяемые префиксы
+
+`ResourceID` принимает только id с **известным префиксом**. Базовый набор берётся из
+[`ids.KnownPrefixes()`](/packages/ids); дополнительные префиксы (для доменов, чьи
+константы живут в самом сервисе) добавляются через переменную окружения
+`KACHO_EXTRA_RESOURCE_ID_PREFIXES` (константа `EnvExtraResourceIDPrefixes`). Так `ids`
+остаётся единственным источником истины, а сервис при необходимости расширяет набор без
+правки библиотеки.
+
+```go
+// malformed id → InvalidArgument первым стейтментом RPC
+if err := validate.ResourceID("Network", ids.PrefixNetwork, req.GetId()); err != nil {
+    return nil, err
+}
+```
+
+## Update-mask дисциплина
+
+`Update`-RPC принимает `google.protobuf.FieldMask`. `UpdateMask` реализует единое
+правило: путь маски вне множества known-полей → `InvalidArgument`. Проверка immutable-
+полей и full-object PATCH при пустой маске — на стороне use-case (по конвенциям Kachō),
+а `validate.UpdateMask` закрывает именно «unknown path».
+
+```go
+known := map[string]struct{}{"name": {}, "description": {}, "labels": {}}
+if err := validate.UpdateMask("update_mask", req.GetUpdateMask().GetPaths(), known); err != nil {
+    return nil, err
+}
+```
+
+## Корнер-кейсы и лучшие практики
+
+- **Пустоту проверяйте отдельно.** Валидаторы имени пропускают пустую строку (кроме
+  strict `Name`), потому что «required» — решение ресурса, а не формата.
+- **`PageSize` возвращает нормализованное значение** — используйте его, а не исходный
+  вход: `0` превращается в дефолт, слишком большое — в максимум.
+- **Тексты стабильны** — они часть контракта (как в [`errors`](/packages/errors)). Регексы
+  вынесены прямо в сообщение, чтобы клиент понимал требование без обращения к докам.
+
+## Импорты и зависимости
+
+`corelib/errors`, `corelib/ids`, `grpc/codes`, `grpc/status`, `net`, `regexp`,
+`unicode/utf8`. Потребляется сервисным слоем всех доменов.

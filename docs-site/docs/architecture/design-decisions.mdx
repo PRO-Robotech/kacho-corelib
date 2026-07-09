@@ -1,0 +1,97 @@
+---
+id: design-decisions
+sidebar_position: 2
+title: Проектные решения
+---
+
+# Проектные решения
+
+Эта страница фиксирует **осознанные проектные решения corelib и их обоснование** — «что
+сделано так и почему». Она адресована контрибьюторам и потребителям пакетов: понимание
+мотивов бережёт от ошибочного использования и от «исправлений», ломающих инвариант.
+
+## Ключевые решения
+
+<table>
+  <thead><tr><th>Решение</th><th>Почему так</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Фоновый worker отвязан от request-context</td>
+      <td><code>operations.Run</code> запускает работу мутации, не наследуя cancel/deadline запроса (handler сразу отдаёт <code>Operation</code>), но наследуя observability через <a href="/packages/observability">baggage</a>. Поверх — собственный per-op timeout (<code>WithOperationTimeout</code>, дефолт 4m, строго меньше grace reconciler'а): зависший вызов не держит слот пула вечно</td>
+    </tr>
+    <tr>
+      <td>Backpressure без потери данных</td>
+      <td>При переполнении in-memory backlog (<code>WithMaxBacklog</code>) задача не кладётся в память — операция уже durable в БД и будет добрана reconciler'ом. Это ограничивает память под перегрузкой ценой задержки, а не ценой потери интента</td>
+    </tr>
+    <tr>
+      <td>Доверие к forwarded-principal — только на границе</td>
+      <td><a href="/packages/grpcsrv">grpcsrv</a> принимает <code>x-kacho-principal-*</code> лишь от mTLS-verified peer'а, а через <code>WithTrustedForwarders</code> — только от allow-list'а cert-identity доверенных forwarder'ов (edge-gateway). Внутренний периметр не доверенный (defense-in-depth против lateral movement)</td>
+    </tr>
+    <tr>
+      <td>Авторизация fail-closed по умолчанию</td>
+      <td><a href="/packages/authz">authz</a>: не-замапленный RPC, недоступность PDP, отсутствие principal — всё это deny. Нет name-based исключений для «internal»-RPC: exempt только явным флагом в карте</td>
+    </tr>
+    <tr>
+      <td>Конфигурация — из окружения (12-factor)</td>
+      <td><a href="/packages/observability">config</a> читает env-переменные (<code>KACHO_&lt;DOMAIN&gt;_&lt;NAME&gt;</code>), а не файловый YAML. Сервисы деплоятся в Kubernetes, где конфиг приходит из ConfigMap/Secret → env; отдельный YAML-слой добавил бы вторую точку истины без выгоды. Валидация значений — в domain-типах на входе</td>
+    </tr>
+    <tr>
+      <td>Реестр id-префиксов — единый и пополняемый</td>
+      <td>Карта 3-символьных префиксов всех доменов живёт в <a href="/packages/ids">ids</a>/<a href="/packages/validate">validate</a>, чтобы <code>ResourceID</code> на edge api-gateway давал консистентную ошибку без дублирования в каждом сервисе. Новый домен добавляет свой префикс одной строкой</td>
+    </tr>
+  </tbody>
+</table>
+
+## Известные ограничения
+
+Честный перечень границ библиотеки — чтобы потребитель учёл их в своём коде.
+
+- **Outbox: нет встроенного retention.** Таблица `outbox` растёт монотонно; хелпер
+  компакции (сохраняющий anti-race инвариант reconciler'а) пока не предоставляется. Для
+  больших объёмов предусмотрите периодическую очистку доставленных строк, сохраняя
+  последний intent на ресурс.
+- **Outbox: эталонные индексы под claim.** Запросы claim (`ORDER BY attempt_count, id`) и
+  проверки intent выигрывают от partial-индексов — их создаёт миграция сервиса, а не
+  библиотека.
+- **Outbox drainer: Apply внутри claim-транзакции.** Внешняя доставка выполняется под
+  held-lock (лизинг для HA-dedup). Не выставляйте `idle_in_transaction_session_timeout`
+  ниже `ApplyTimeout`.
+- **Телеметрия трейсов.** `observability.InitOtel` при заданном endpoint логирует
+  предупреждение и не экспортирует трейсы: OTLP-exporter в этой сборке не подключён
+  (активен структурированный `slog`). Реальный экспорт — на стороне потребителя.
+- **`filter`/`selector` — defense-in-depth по whitelist.** SQL-условия параметризованы по
+  значениям; имена полей берутся из whitelist при разборе. Не передавайте имена полей из
+  недоверенного источника в обход разбора.
+
+## Транзитные примитивы (мигрируйте на рекомендованные)
+
+Часть API оставлена для обратной совместимости, но у неё есть предпочтительная замена.
+
+<table>
+  <thead><tr><th>Транзитный примитив</th><th>Рекомендованная замена</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>operations.Run</code> / <code>ConfigureDefault</code> (глобальный default-worker)</td>
+      <td><code>RunWithWorker(w, …)</code> + <code>NewWorker(…)</code> — явный DI worker'а в composition root. <strong>Footgun:</strong> вызов <code>Run</code> до <code>ConfigureDefault(WithRecorder(…))</code> залатчит default-registry с <code>NopRecorder</code> (метрики немы) — конфигурируйте до первого <code>Run</code> или используйте <code>RunWithWorker</code></td>
+    </tr>
+    <tr>
+      <td><code>grpcsrv.UnaryPrincipalExtract</code> (безусловное доверие к заголовкам)</td>
+      <td><code>UnaryCertIdentityExtract</code> + <code>UnaryTrustedPrincipalExtract(WithTrustedForwarders(…))</code> — trust-aware связка для mTLS-листенеров. Legacy-примитив нужен только для insecure dev-листенера и выводит startup-WARN</td>
+    </tr>
+    <tr>
+      <td><code>Repo.Get</code> / <code>Repo.Cancel</code> (unscoped) для tenant-facing</td>
+      <td><code>AsOwned(repo).GetOwned</code> / <code>CancelOwned</code> — ownership-scoped доступ (id операции публичен и перечислим; unscoped-путь только для доверенных internal-вызовов)</td>
+    </tr>
+  </tbody>
+</table>
+
+:::note Осознанные решения, а не дефекты
+Пункты выше — принятые проектные решения и известные границы, а не баги. Ревью не должно
+заводить на них новые issue как на дефект. Реальные дефекты (не отклонения) — чинятся в
+том же PR, а не документируются.
+:::
+
+## Дальше
+
+- Место corelib в архитектуре платформы — [Обзор архитектуры](/architecture/overview).
+- Reference по каждому пакету — [Обзор пакетов](/packages/overview).
