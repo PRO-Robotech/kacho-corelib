@@ -1,0 +1,130 @@
+---
+id: authz
+sidebar_position: 11
+title: authz · auth
+---
+
+# authz · auth
+
+Эти пакеты решают задачу **авторизации каждого RPC и переноса caller-identity между
+сервисами**. Инвариант платформы: ни один запрос — ни на public, ни на internal
+listener — не выполняется без проверки прав. `authz` даёт gRPC-интерсептор, который перед
+каждым методом спрашивает PDP (`InternalIAMService.Check` → OpenFGA/ReBAC): «можно ли
+этому principal'у это действие над этим объектом?» — с кэшем решений, fail-closed
+поведением и защитой от denied-storm. `auth` переносит principal в исходящую
+metadata, чтобы peer-сервис знал, от чьего имени пришёл вызов.
+
+## authz — интерсептор авторизации
+
+Интерсептор строится из карты `RPCMap` (какое отношение требует каждый метод), PDP-клиента
+и кэша. Метод, которого нет в карте, по умолчанию **запрещён** (fail-closed).
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>NewInterceptor(opts InterceptorOptions) *Interceptor</code></td><td>Собирает интерсептор</td></tr>
+    <tr><td><code>(*Interceptor).Unary()</code> / <code>Stream()</code></td><td>gRPC-интерсепторы для обоих listener'ов</td></tr>
+    <tr><td><code>(*Interceptor).Metrics() Metrics</code></td><td>Счётчики allow/deny/cache-hit</td></tr>
+    <tr><td><code>(*Interceptor).EvictInactiveSubjects(maxAge) int</code></td><td>Периодическая очистка кэша по неактивным субъектам</td></tr>
+  </tbody>
+</table>
+
+### InterceptorOptions
+
+<table>
+  <thead><tr><th>Поле</th><th>Смысл</th></tr></thead>
+  <tbody>
+    <tr><td><code>ServiceName</code></td><td>Имя сервиса для метрик/логов (<code>kacho-vpc</code>…)</td></tr>
+    <tr><td><code>Map RPCMap</code></td><td>Карта «метод → требуемое отношение + как извлечь объект»</td></tr>
+    <tr><td><code>Client CheckClient</code></td><td>PDP-клиент к <code>InternalIAMService.Check</code></td></tr>
+    <tr><td><code>Cache *Cache</code></td><td>Кэш решений (обязателен; общий с listen-invalidate)</td></tr>
+    <tr><td><code>Breakglass</code></td><td>Аварийный обход всех Check с WARN (только по env, осознанно)</td></tr>
+    <tr><td><code>DenyRateLimitPerSec</code></td><td>Token-bucket на denied-storm per-principal (дефолт 100/s)</td></tr>
+    <tr><td><code>CheckTimeout</code></td><td>Таймаут одного Check (дефолт 2s)</td></tr>
+    <tr><td><code>AllowSystemPrincipal</code></td><td>Пропускать system-principal без Check (bootstrap/фоновые job'ы; дефолт false)</td></tr>
+  </tbody>
+</table>
+
+### Поведение (fail-closed)
+
+<table>
+  <thead><tr><th>Ситуация</th><th>Решение</th></tr></thead>
+  <tbody>
+    <tr><td>Check вернул allow</td><td>Пропустить; закэшировать положительное решение</td></tr>
+    <tr><td>Check вернул deny</td><td><code>PermissionDenied</code> (отрицательные не кэшируются)</td></tr>
+    <tr><td>Метод не в <code>RPCMap</code></td><td><strong>Запрещён</strong> по умолчанию (internal — fail-closed)</td></tr>
+    <tr><td>PDP недоступен / ошибка</td><td>Fail-closed (запрет), не «пропустить на всякий случай»</td></tr>
+    <tr><td>Нет principal в ctx</td><td>Запрет (анонимный запрос не проходит)</td></tr>
+    <tr><td>Existence-hiding метод</td><td>Deny маппится в <code>NotFound</code> (не раскрывать существование объекта)</td></tr>
+  </tbody>
+</table>
+
+## Cache — кэш решений PDP
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>NewCache(ttl)</code> / <code>NewCacheWithLimit(ttl, maxEntries)</code></td><td>Кэш с TTL (и границей числа записей, дефолт 100k)</td></tr>
+    <tr><td><code>Get / SetAllowed</code></td><td>Читать / записать положительное решение</td></tr>
+    <tr><td><code>InvalidateBySubject(id)</code> / <code>InvalidateAll()</code></td><td>Инвалидация при revoke прав</td></tr>
+    <tr><td><code>Size()</code></td><td>Число субъектов и записей (наблюдение)</td></tr>
+  </tbody>
+</table>
+
+Кэшируются только **положительные** решения (deny всегда перепроверяется). При отзыве
+прав кэш инвалидируется — через `ListenInvalidator.Run(ctx)`, слушающий Postgres
+LISTEN/NOTIFY о subject-change (с auto-reconnect и backoff).
+
+## ListObjects — фильтрация списков по правам
+
+Публичный `List<Resource>` обязан отдавать только объекты, доступные caller'у.
+`ListObjectsService` спрашивает у PDP множество разрешённых id и фильтрует по нему.
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>NewListObjectsService(client, cfg) *ListObjectsService</code></td><td>Собрать сервис scope-фильтрации</td></tr>
+    <tr><td><code>(*ListObjectsService).ListAllowedIDs(…)</code></td><td>Множество id, к которым у subject есть доступ (с кэшем и опциями)</td></tr>
+    <tr><td><code>InvalidateBySubject / InvalidateAll / Size</code></td><td>Управление кэшем scope</td></tr>
+  </tbody>
+</table>
+
+## auth — перенос principal между сервисами
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>PropagateOutgoing(ctx) context.Context</code></td><td>Кладёт principal из ctx в исходящую gRPC-metadata (<code>x-kacho-principal-*</code>) для peer-вызова</td></tr>
+    <tr><td><code>SystemPrincipalFor(service, role string) operations.Principal</code></td><td>Детерминированный system/SA-principal для service→service (переживает FGA subject-sanitizer)</td></tr>
+  </tbody>
+</table>
+
+```go
+// исходящий вызов peer-сервиса из handler'а — с principal
+ctx = auth.PropagateOutgoing(ctx)
+_, err := geoClient.GetZone(ctx, &geopb.GetZoneRequest{Id: zoneID})
+
+// из detached-фона (worker/drainer) — явный system/SA principal
+p := auth.SystemPrincipalFor("kacho-vpc", "fga_writer")
+ctx = operations.WithPrincipal(ctx, p)
+ctx = auth.PropagateOutgoing(ctx)
+```
+
+## Корнер-кейсы и лучшие практики
+
+- **authz — на обоих listener'ах.** Internal без authz-Check — нарушение инварианта
+  безопасности (internal-периметр не доверенный).
+- **Fail-closed везде.** Недоступность PDP → запрет; неизвестный метод → запрет. Никогда
+  не «пропускать на всякий случай».
+- **Инвалидируйте кэш на revoke.** Положительные решения кэшируются на TTL; отзыв прав без
+  инвалидации даст окно устаревшего allow.
+- **Worker, зовущий peer, обязан нести principal.** Иначе вызов анонимен и упрётся в этот
+  же интерсептор на стороне peer'а (см. [operations](/packages/operations)).
+- **`Breakglass` — только осознанно**, через env, с громким WARN. Это аварийный обход, не
+  штатный режим.
+
+## Импорты и зависимости
+
+`authz` — `grpc`, `slog`, `corelib/operations` (principal). `auth` —
+`corelib/operations`, `grpc/metadata`. Потребляется composition root и clients-слоем
+сервисов; PDP-сторона — kacho-iam.

@@ -1,0 +1,5 @@
+apiVersion: v2
+name: corelib-docs
+version: 0.1.0
+appVersion: 0.1.0
+description: Kachō Corelib docs — Docusaurus (AntD-flavored) static site, nginx-served

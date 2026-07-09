@@ -1,0 +1,85 @@
+---
+id: db
+sidebar_position: 6
+title: db
+---
+
+# db
+
+Пакет `db` решает задачу **единой, безопасной точки доступа к Postgres**. Каждый сервис
+Kachō владеет своей базой (database-per-service) и обращается к ней через `pgx` без ORM.
+`db` даёт две вещи: правильно сконфигурированный пул соединений (fail-fast, с
+`statement_timeout` и трассировкой) и транзактор, который группирует мутацию и
+outbox-эмит в одной транзакции с откатом на ошибке или панике.
+
+## Пул соединений
+
+```go
+pool, err := db.NewPool(ctx, dsn) // postgres://…?application_name=kacho-vpc
+if err != nil {
+    return err
+}
+defer pool.Close()
+```
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>NewPool(ctx, dsn string) (*pgxpool.Pool, error)</code></td><td>Единственная точка создания пула. Задаёт конфигурацию соединения (search_path, statement cache), ставит <code>statement_timeout</code>, регистрирует pgx-трассировку и делает fail-fast <code>Ping</code></td></tr>
+  </tbody>
+</table>
+
+:::note Fail-fast и без утечки DSN
+`NewPool` пингует базу при старте: недоступный Postgres → ошибка сразу, а не при первом
+запросе. Ошибка разбора DSN **не** включает сам DSN в текст (пароль в connection-строке
+не попадёт в логи) — это проверяется тестом пакета.
+:::
+
+## Транзактор
+
+`Transactor` оборачивает пул и выполняет функцию внутри транзакции. Успех → commit,
+ошибка или паника → rollback. `pgx.Tx` передаётся в функцию, чтобы мутация и
+outbox-эмит писались одной транзакцией.
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>NewTransactor(p *pgxpool.Pool) *Transactor</code></td><td>Создаёт транзактор поверх пула</td></tr>
+    <tr><td><code>(*Transactor).InTx(ctx, fn func(tx pgx.Tx) error) error</code></td><td>Открывает транзакцию, выполняет <code>fn(tx)</code>, коммитит при <code>nil</code>, откатывает при ошибке/панике</td></tr>
+  </tbody>
+</table>
+
+```go
+tx := db.NewTransactor(pool)
+err := tx.InTx(ctx, func(tx pgx.Tx) error {
+    if err := repo.CreateNetwork(ctx, tx, n); err != nil {
+        return err // rollback
+    }
+    // событие пишется той же транзакцией — атомарность гарантирована
+    return outbox.Emit(ctx, tx, "networks", "network", n.ID, "network.created", payload)
+})
+```
+
+## Почему атомарность важна
+
+Мутация ресурса и её outbox-событие обязаны быть атомарны: либо оба записаны, либо ни
+одного. Иначе возможен «потерянный интент» (ресурс создан, событие не записано) или
+«фантомное событие» (событие есть, ресурса нет). `InTx` + [`outbox.Emit`](/packages/outbox)
+в одной функции закрывают это на уровне БД — а не софт-проверкой после коммита.
+
+## Корнер-кейсы и лучшие практики
+
+- **Один пул на сервис**, создаётся в composition root (`cmd/<svc>/main.go`), закрывается
+  на shutdown. Глобальные синглтоны вне `cmd/` запрещены конвенциями чистой архитектуры.
+- **`application_name` в DSN** — ставьте `kacho-<svc>`, чтобы соединения были опознаваемы
+  в `pg_stat_activity`.
+- **Within-service инварианты — на уровне БД** (FK/UNIQUE/EXCLUDE/CHECK/CAS), не
+  software `Get→check→Update`. `db` даёт транзакцию; сами инварианты выражаются DDL.
+- **Не оборачивайте read-only запросы в `InTx`** без нужды — транзакция нужна там, где
+  есть мутация + outbox или несколько зависимых записей.
+
+## Импорты и зависимости
+
+`context`, `github.com/jackc/pgx/v5`, `github.com/jackc/pgx/v5/pgxpool`. Потребляется
+repo-слоем сервисов и пакетами [`operations`](/packages/operations),
+[`outbox`](/packages/outbox).

@@ -1,0 +1,113 @@
+---
+id: observability
+sidebar_position: 13
+title: observability · config · baggage · safeconv
+---
+
+# observability · config · baggage · safeconv
+
+Четыре небольших пакета обслуживают **рантайм сервиса**: как загрузить конфигурацию, как
+логировать и трассировать, как донести observability-контекст до фоновой работы и как
+безопасно сузить числовой тип. Каждый узкий, но нужен в каждом сервисе — поэтому живёт в
+corelib.
+
+## config — конфигурация из окружения
+
+Сервис конфигурируется переменными окружения `KACHO_<DOMAIN>_<NAME>`. `config`
+разбирает окружение в структуру и падает, если обязательное поле отсутствует.
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>Load(c any) error</code></td><td>Заполняет поля структуры <code>c</code> из окружения; ошибка на отсутствующем required</td></tr>
+    <tr><td><code>LoadPrefixed(prefix string, c any) error</code></td><td>То же с префиксом переменных</td></tr>
+  </tbody>
+</table>
+
+```go
+type Config struct {
+    DBPassword string `env:"KACHO_VPC_DB_PASSWORD,required"`
+    GeoAddr    string `env:"KACHO_VPC_GEO_ADDR"`
+}
+var cfg Config
+if err := config.Load(&cfg); err != nil {
+    return err // fail-fast: обязательное поле не задано
+}
+```
+
+## observability — логи и телеметрия
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>NewSlogger(w io.Writer) *slog.Logger</code></td><td>Структурированный JSON-логгер (уровень Info)</td></tr>
+    <tr><td><code>NewSloggerLevel(w io.Writer, level slog.Leveler) *slog.Logger</code></td><td>То же с явным уровнем</td></tr>
+    <tr><td><code>InitOtel(ctx, serviceName string) (ShutdownFn, error)</code></td><td>Точка инициализации телеметрии; возвращает <code>ShutdownFn</code> для graceful-flush</td></tr>
+    <tr><td><code>ShutdownFn func(context.Context) error</code></td><td>Функция завершения телеметрии (регистрируется в <a href="/packages/resilience">shutdown</a>)</td></tr>
+  </tbody>
+</table>
+
+При пустом OTel-endpoint `InitOtel` — noop. При заданном endpoint в текущей сборке он
+логирует предупреждение и **не** экспортирует трейсы: OTLP-exporter здесь не подключён,
+активно структурированное логирование (`slog`). Реальный экспорт трейсов — на стороне
+потребителя. `ShutdownFn` всё равно кладётся в `shutdown.Manager` для корректного
+завершения.
+
+## baggage — observability-контекст в фон
+
+Фоновый worker получает **detached** context (без cancel/deadline вызывающего запроса).
+Но trace, request-id и slog-логгер терять нельзя — иначе фоновая работа выпадает из
+трассировки. `baggage.Extract` строит новый context, который **несёт** observability-
+значения, но **не наследует** отмену и дедлайн.
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>Extract(callerCtx context.Context) context.Context</code></td><td>Новый ctx с trace/slog из <code>callerCtx</code>, но без его cancel/deadline</td></tr>
+  </tbody>
+</table>
+
+```go
+// внутри operations.Run: worker получает baggage-context вызывающего запроса
+workerCtx := baggage.Extract(callerCtx)
+// отмена/дедлайн запроса НЕ прервут worker; trace продолжается
+```
+
+Именно `baggage` позволяет [`operations`](/packages/operations) переносить principal и
+trace в фон, не привязывая долгую работу к жизни короткого запроса.
+
+## safeconv — безопасные числовые конверсии
+
+Обычное `int32(x)` в Go тихо оборачивается при переполнении (что помечает статический
+анализатор gosec G115). `safeconv` делает усечение явным и **saturating** — вместо
+wrap-around значение упирается в границу типа, поэтому раздутый вход не превращается в
+отрицательное или искажённое число.
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>ClampInt32(v int64) int32</code></td><td>Saturating int64 → int32</td></tr>
+    <tr><td><code>ClampNonNegInt32(v int64) int32</code></td><td>То же в диапазон <code>[0, MaxInt32]</code> (для page-size, счётчиков)</td></tr>
+    <tr><td><code>IntToInt32(v int) int32</code> · <code>IntToUint32(v int) uint32</code></td><td>Saturating конверсии платформенного int</td></tr>
+  </tbody>
+</table>
+
+Используется там, где `int64`-поля proto (page-size, счётчики) кладутся на более узкие
+внутренние типы.
+
+## Корнер-кейсы и лучшие практики
+
+- **`config.Load` — в composition root**, один раз при старте. Обязательные секреты
+  помечайте `required`, чтобы сервис падал явно, а не работал с пустым паролем.
+- **`baggage.Extract`, а не голый `context.Background()`** для фона — иначе теряете trace
+  и principal.
+- **Не используйте голое `int32(x)`** для внешних чисел — только `safeconv`, иначе
+  переполнение пройдёт тихо.
+- **`ShutdownFn` из `InitOtel`** обязательно регистрируйте в `shutdown` — иначе последние
+  спаны/метрики не допушатся.
+
+## Импорты и зависимости
+
+`config` — envconfig-обёртка. `observability` — `log/slog`, OpenTelemetry SDK. `baggage`
+— `context`, OTel + `corelib/operations`. `safeconv` — только `math`. Все потребляются
+composition root и use-case-слоем сервисов.

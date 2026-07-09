@@ -1,0 +1,103 @@
+---
+id: resilience
+sidebar_position: 12
+title: retry · backoff · shutdown
+---
+
+# retry · backoff · shutdown
+
+Три пакета отвечают за **устойчивость сервиса под сбоями и корректное завершение**. Сеть
+между сервисами не идеальна: peer может кратко стать недоступен или ответить `Aborted` на
+конкурентный CAS — тогда идемпотентный вызов стоит повторить (`retry` + `backoff`). А при
+остановке процесса ресурсы (пул БД, gRPC-серверы, worker'ы) нужно закрыть в правильном
+порядке и не зависнуть на одном из них (`shutdown`).
+
+## retry — повтор идемпотентных вызовов
+
+`retry` повторяет функцию, пока она возвращает ошибку из заданного набора gRPC-кодов, с
+экспоненциальным backoff и уважением к отмене контекста.
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>OnUnavailable(ctx, fn func(ctx) error) error</code></td><td>Повтор только на <code>Unavailable</code> (peer временно недоступен)</td></tr>
+    <tr><td><code>OnAborted(ctx, fn func(ctx) error) error</code></td><td>Повтор только на <code>Aborted</code> (конкурентный CAS-конфликт)</td></tr>
+    <tr><td><code>OnCodes(ctx, fn func(ctx) error, retryCodes ...codes.Code) error</code></td><td>Повтор на произвольном наборе кодов</td></tr>
+    <tr><td><code>Defaults</code></td><td>Параметры по умолчанию (интервалы, порог)</td></tr>
+  </tbody>
+</table>
+
+```go
+err := retry.OnUnavailable(ctx, func(ctx context.Context) error {
+    _, e := geoClient.GetZone(ctx, req)
+    return e
+})
+```
+
+:::warning Только идемпотентные вызовы
+Повторять можно **только** операции без побочного эффекта от повтора (read, идемпотентный
+write, CAS). Неидемпотентную мутацию `retry` превратит в дубль. `OnAborted` — специально
+для CAS-путей, где повтор корректен по построению. Non-gRPC-ошибка и отмена ctx
+прекращают повтор немедленно (fail-fast).
+:::
+
+## backoff — стратегия задержек
+
+`backoff` даёт саму стратегию задержки — экспоненциальную (с jitter и порогом суммарного
+времени) или постоянную. Используется `retry`, drainer'ом и фоновыми циклами.
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>NewConstantBackOff(d) Backoff</code></td><td>Постоянная задержка <code>d</code></td></tr>
+    <tr><td><code>ExponentialBackoffBuilder()</code></td><td>Builder экспоненциального backoff</td></tr>
+    <tr><td><code>.WithInitialInterval(d)</code> · <code>.WithMultiplier(m)</code> · <code>.WithMaxInterval(d)</code></td><td>Стартовый интервал, множитель (≥ 1), потолок интервала</td></tr>
+    <tr><td><code>.WithRandomizationFactor(f)</code> · <code>.WithMaxElapsedThreshold(d)</code></td><td>Jitter (клампится в [0,1]) и порог суммарного времени (после — стоп)</td></tr>
+    <tr><td><code>.Build() Backoff</code></td><td>Готовая стратегия</td></tr>
+  </tbody>
+</table>
+
+Jitter обязателен, чтобы избежать синхронного «стада» ретраев (thundering herd);
+`MaxElapsedThreshold` гарантирует, что повторы не длятся вечно.
+
+## shutdown — graceful-завершение
+
+`shutdown.Manager` собирает завершающие handlers и выполняет их в порядке **LIFO** при
+сигнале/отмене, с per-handler таймаутом (чтобы один зависший ресурс не заблокировал
+остановку).
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>New(opts ...Option) *Manager</code></td><td>Создать manager</td></tr>
+    <tr><td><code>WithHandlerTimeout(d)</code> · <code>WithLogger(l)</code></td><td>Per-handler таймаут (дефолт 10s), логгер</td></tr>
+    <tr><td><code>(*Manager).OnExit(handlers ...Handler)</code></td><td>Зарегистрировать завершающие функции (выполняются LIFO)</td></tr>
+    <tr><td><code>(*Manager).Wait(ctx) error</code></td><td>Блокирует до отмены ctx, затем запускает handlers</td></tr>
+    <tr><td><code>(*Manager).Close() error</code></td><td>Немедленно запустить handlers (идемпотентно; возвращает первую ошибку)</td></tr>
+    <tr><td><code>ErrHandlerTimeout</code></td><td>Sentinel: handler не уложился в таймаут</td></tr>
+  </tbody>
+</table>
+
+```go
+sd := shutdown.New(shutdown.WithHandlerTimeout(15 * time.Second))
+sd.OnExit(func() error { grpcServer.GracefulStop(); return nil })
+sd.OnExit(func() error { worker.Stop(); return nil })
+sd.OnExit(func() error { pool.Close(); return nil })
+// пул закроется ПОСЛЕДНИМ (LIFO) — уже после остановки сервера и worker'ов
+return sd.Wait(ctx)
+```
+
+## Корнер-кейсы и лучшие практики
+
+- **LIFO — не случайность.** Регистрируйте ресурсы в порядке создания; закроются в
+  обратном (пул БД — последним, уже после того как перестали приходить запросы).
+- **Handler после `Close()`** выполняется немедленно (регистрация после старта завершения
+  не теряется).
+- **`retry` + `backoff` идут в паре**: `retry` решает «повторять ли», `backoff` — «через
+  сколько». Не крутите повтор без задержки.
+
+## Импорты и зависимости
+
+`retry` — `grpc/codes`, `grpc/status`, `corelib/backoff`. `backoff` — stdlib (`time`).
+`shutdown` — stdlib (`context`, `log/slog`, `time`). Потребляются composition root и
+clients-слоем сервисов.

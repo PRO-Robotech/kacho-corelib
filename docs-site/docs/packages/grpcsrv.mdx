@@ -1,0 +1,92 @@
+---
+id: grpcsrv
+sidebar_position: 9
+title: grpcsrv
+---
+
+# grpcsrv
+
+Пакет `grpcsrv` решает задачу **единой, безопасной сборки gRPC-сервера сервиса**.
+Каждый доменный сервис Kachō слушает публичный и cluster-internal listener'ы, и на
+**обоих** транспорт — mTLS, а из соединения нужно достоверно извлечь, кто клиент
+(cert-identity) и от чьего имени идёт запрос (principal, ACR). `grpcsrv` даёт mTLS-
+credentials, keepalive-политику и интерсепторы извлечения identity с явной trust-границей
+— чтобы ни один сервис не переизобретал это (и не ошибался в безопасности).
+
+## Сборка сервера и mTLS
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>NewServer(opts ...grpc.ServerOption) *grpc.Server</code></td><td>Создаёт <code>*grpc.Server</code> с keepalive-enforcement по умолчанию и health-check</td></tr>
+    <tr><td><code>DefaultKeepaliveEnforcement() keepalive.EnforcementPolicy</code></td><td>Политика, исправляющая слишком строгий gRPC-дефолт (не роняет idle-stream)</td></tr>
+    <tr><td><code>TLSServer&#123; Enable, CertFile, KeyFile, ClientCAFiles &#125;</code></td><td>Конфигурация mTLS сервера</td></tr>
+    <tr><td><code>TLSServerCreds(cfg TLSServer) (grpc.ServerOption, error)</code></td><td>Строит серверные credentials; требует и верифицирует client-cert</td></tr>
+  </tbody>
+</table>
+
+:::warning Fail-closed, а не тихий plaintext
+`TLSServerCreds` — единственная точка построения серверного TLS (прямой `tls.Config`
+вне хелпера запрещён и проверяется тестом). Если `Enable=true`, но сертификаты
+некорректны/недоступны — возвращается **ошибка**, сервис не стартует (fail-closed).
+Insecure-транспорт возможен только при явном `Enable=false` — это dev-путь, недопустимый
+на развёрнутом стенде. Production-профиль включает mTLS на обоих listener'ах.
+:::
+
+## Cert-identity: кто на том конце соединения
+
+Из верифицированного client-cert извлекается устойчивая идентичность пира (по SPIFFE-SAN
+`spiffe://kacho.cloud/…`). Она несёт флаг `verified` — доверять можно только
+верифицированной.
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>CertIdentity(cert *x509.Certificate) string</code></td><td>Идентичность пира из cert (SPIFFE-SAN)</td></tr>
+    <tr><td><code>UnaryCertIdentityExtract()</code> / <code>StreamCertIdentityExtract()</code></td><td>Интерсепторы: кладут cert-identity в ctx</td></tr>
+    <tr><td><code>CertIdentityFromContext(ctx) (id string, verified bool)</code></td><td>Читает identity + признак верификации</td></tr>
+  </tbody>
+</table>
+
+## Principal и ACR: от чьего имени идёт запрос
+
+Principal (кто инициировал) и ACR (уровень аутентификации, authentication context class)
+переносятся в metadata. Извлечение — с trust-границей: доверять этим заголовкам можно
+только от **доверенного forwarder'а** (edge/gateway) поверх верифицированного mTLS.
+
+<table>
+  <thead><tr><th>Символ</th><th>Назначение</th></tr></thead>
+  <tbody>
+    <tr><td><code>UnaryPrincipalExtract(opts…)</code> / <code>StreamPrincipalExtract(opts…)</code></td><td>Извлекают principal из metadata (<code>x-kacho-principal-*</code>); без заголовков — fallback <code>SystemPrincipal</code></td></tr>
+    <tr><td><code>WithPrincipalDebug(bool)</code> / <code>WithPrincipalDebugLogger(l)</code></td><td>Опц. debug-лог (по умолчанию off; redaction чувствительных полей)</td></tr>
+    <tr><td><code>UnaryTrustedPrincipalExtract(opts…)</code> / <code>StreamTrustedPrincipalExtract(opts…)</code></td><td>Доверенное извлечение: principal принимается только от verified forwarder'а</td></tr>
+    <tr><td><code>WithTrustedForwarders(sans…)</code></td><td>Список SAN'ов доверенных forwarder'ов (edge/gateway)</td></tr>
+    <tr><td><code>TrustedPrincipalFromContext(ctx) (operations.Principal, bool)</code></td><td>Читает доверенный principal</td></tr>
+    <tr><td><code>ACRRank(acr) int</code> / <code>ACRSatisfies(presented, required) bool</code></td><td>Ранжирование и проверка достаточности ACR (step-up)</td></tr>
+    <tr><td><code>WithTrustedACR(ctx, acr, trusted)</code> / <code>TrustedACRFromContext(ctx)</code></td><td>Перенос доверенного ACR в ctx</td></tr>
+  </tbody>
+</table>
+
+:::note Внутренний периметр не доверенный
+Верифицированного mTLS **недостаточно**, чтобы принять principal-заголовки: их несёт
+только доверенный forwarder (SAN в `WithTrustedForwarders`). Обычный verified-пир, не
+входящий в список forwarder'ов, — principal сбрасывается. Это defense-in-depth против
+lateral movement: скомпрометированный внутренний пир не сможет выдать себя за
+произвольного principal'а. Извлечённый principal дальше гейтится
+[`authz`](/packages/authz) на каждом RPC.
+:::
+
+## Корнер-кейсы и лучшие практики
+
+- **Собирайте оба listener'а одинаково** — mTLS + cert-identity + principal-extract +
+  authz. Internal-listener без authz-Check — нарушение инварианта безопасности.
+- **Порядок интерсепторов важен**: сначала cert-identity/principal-extract, затем
+  authz-Check (ему нужен principal в ctx).
+- **`verified=false` — не доверять.** Всегда проверяйте флаг из
+  `CertIdentityFromContext`, а не только наличие identity.
+
+## Импорты и зависимости
+
+`crypto/x509`, `grpc`, `grpc/keepalive`, `grpc/credentials`, `corelib/operations`
+(тип `Principal`). Потребляется composition root (`cmd/<svc>/main.go`) всех сервисов;
+парная сторона — [grpcclient](/packages/grpcclient).

@@ -1,0 +1,89 @@
+---
+id: errors
+sidebar_position: 4
+title: errors
+---
+
+# errors
+
+Пакет `errors` решает задачу **единообразных, машиночитаемых ошибок API**. Клиент
+платформы должен получать одинаково устроенный ответ независимо от того, какой сервис
+его вернул: числовой gRPC-код, стабильный текст и структурированные детали
+(`google.rpc.Status`). `errors` — это builder такого статуса: сервис собирает ошибку
+цепочкой вызовов, а на выходе получает `error`, который grpc-gateway спроецирует в REST
+как `{code, message, details[]}`.
+
+```go
+return errors.InvalidArgument().
+    AddFieldViolation("name", "must not be empty").
+    Err()
+```
+
+## Конструкторы
+
+Каждый возвращает `*Builder` с уже установленным кодом и базовым текстом.
+
+<table>
+  <thead><tr><th>Конструктор</th><th>gRPC-код</th><th>Текст / детали</th></tr></thead>
+  <tbody>
+    <tr><td><code>NotFound(kind, id string)</code></td><td><code>NOT_FOUND</code></td><td>«<code>&lt;Kind&gt; '&lt;id&gt;' was not found</code>» + <code>ResourceInfo</code> detail</td></tr>
+    <tr><td><code>AlreadyExists(kind, id string)</code></td><td><code>ALREADY_EXISTS</code></td><td>«<code>&lt;kind&gt; &lt;id&gt; already exists</code>»</td></tr>
+    <tr><td><code>InvalidArgument()</code></td><td><code>INVALID_ARGUMENT</code></td><td>базовый «invalid argument»; уточняется через <code>AddFieldViolation</code></td></tr>
+    <tr><td><code>FailedPrecondition(msg string)</code></td><td><code>FAILED_PRECONDITION</code></td><td>переданный текст</td></tr>
+    <tr><td><code>Aborted(msg string)</code></td><td><code>ABORTED</code></td><td>переданный текст (для CAS-конфликтов, требующих повтора)</td></tr>
+    <tr><td><code>Unavailable(msg string)</code></td><td><code>UNAVAILABLE</code></td><td>переданный текст (peer-сервис недоступен — fail-closed)</td></tr>
+    <tr><td><code>Internal(msg string)</code></td><td><code>INTERNAL</code></td><td>фиксированный текст — <strong>без утечки pgx/SQL</strong> наружу</td></tr>
+  </tbody>
+</table>
+
+## Методы Builder
+
+<table>
+  <thead><tr><th>Метод</th><th>Действие</th></tr></thead>
+  <tbody>
+    <tr><td><code>AddFieldViolation(field, desc string) *Builder</code></td><td>Добавляет <code>BadRequest.FieldViolation</code> — какое поле и почему нарушено. Можно вызывать несколько раз</td></tr>
+    <tr><td><code>WithLocale(locale string) *Builder</code></td><td>Если задан непустой locale — при <code>Err()</code> добавится <code>LocalizedMessage</code> detail. По умолчанию Kachō возвращает только <code>BadRequest</code> (более structured)</td></tr>
+    <tr><td><code>Err() error</code></td><td>Собирает финальную ошибку с деталями (<code>BadRequest</code>, опц. <code>LocalizedMessage</code>) и возвращает <code>error</code></td></tr>
+  </tbody>
+</table>
+
+:::note Тексты — часть контракта
+Формулировки сообщений стабильны и являются частью API-контракта Kachō. Клиенты и тесты
+на них полагаются; менять текст — осознанное решение (через тикет). Обратите внимание:
+`errors.NotFound` даёт базовый текст `<Kind> '<id>' was not found`, а привычная сервисам
+формулировка `<Resource> %s not found` формируется на слое сервиса поверх этого builder'а.
+:::
+
+## Использование
+
+```go
+// 400 с указанием поля
+return errors.InvalidArgument().
+    AddFieldViolation("cidrBlock", "is not a valid CIDR").
+    Err()
+
+// 404 с ResourceInfo detail
+return errors.NotFound("Subnet", id).Err()
+
+// 503 — peer недоступен (fail-closed для мутаций)
+return errors.Unavailable("geo service unavailable").Err()
+
+// 500 — внутренняя ошибка, БЕЗ текста pgx наружу
+return errors.Internal("internal database error").Err()
+```
+
+## Корнер-кейсы и лучшие практики
+
+- **Никогда не отдавайте pgx/SQL наружу.** Внутреннюю ошибку заворачивайте в
+  `errors.Internal("<фиксированный текст>")`, а причину логируйте отдельно.
+- **`AddFieldViolation` — для валидации входа.** Для `INVALID_ARGUMENT` всегда добавляйте
+  хотя бы одно нарушение поля: клиент должен знать, что именно не так.
+- **Маппинг SQLSTATE → код** делает сервисный слой (`23503`→`FailedPrecondition`,
+  `23505`→`AlreadyExists`/`FailedPrecondition`, `23514`→`InvalidArgument`), но собирает
+  ответ этим builder'ом.
+- **`Aborted` — для CAS-конфликтов**, где клиент может безопасно повторить запрос.
+
+## Импорты и зависимости
+
+`google.golang.org/genproto/googleapis/rpc/errdetails`, `grpc/codes`, `grpc/status`.
+Потребляется пакетом [`validate`](/packages/validate) и сервисным слоем всех доменов.
