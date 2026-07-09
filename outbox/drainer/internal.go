@@ -31,15 +31,42 @@ func (d *Drainer[T]) shutdownCtx(parent context.Context) (context.Context, conte
 // Сразу после reconnect — non-blocking signal на wakeup, чтобы processLoop
 // сделал catch-up (NOTIFY мог быть потерян во время disconnect-window).
 func (d *Drainer[T]) listenLoop(ctx context.Context, wakeup chan<- struct{}) {
-	backoff := 1 * time.Second
-	const maxBackoff = 30 * time.Second
+	d.reconnectLoop(ctx, d.listenOnce, wakeup, sleepFor)
+}
+
+const (
+	initialListenBackoff = 1 * time.Second
+	maxListenBackoff     = 30 * time.Second
+)
+
+// reconnectLoop drives session (one connect+LISTEN+serve cycle) with exponential
+// reconnect backoff. session reports whether it established the subscription
+// (connected) before returning. A connected session that later dropped resets
+// the backoff to initialListenBackoff so a long-lived healthy subscription
+// reconnects promptly instead of at the ratcheted maxListenBackoff cap
+// (otherwise a handful of transient drops over the process lifetime pin the
+// backoff at the cap and every subsequent single-conn hiccup re-establishes
+// LISTEN up to maxListenBackoff late). sleep is injected so tests observe the
+// requested wait deterministically; it returns false if ctx ended during the wait.
+func (d *Drainer[T]) reconnectLoop(
+	ctx context.Context,
+	session func(context.Context, chan<- struct{}) (bool, error),
+	wakeup chan<- struct{},
+	sleep func(context.Context, time.Duration) bool,
+) {
+	backoff := initialListenBackoff
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		err := d.listenOnce(ctx, wakeup)
+		connected, err := session(ctx, wakeup)
 		if ctx.Err() != nil {
 			return
+		}
+		if connected {
+			// Healthy session held the subscription then dropped — reset the cycle
+			// so the next reconnect is prompt, not the ratcheted cap.
+			backoff = initialListenBackoff
 		}
 		if err != nil {
 			d.logger.Warn("listen_conn_drop",
@@ -52,14 +79,12 @@ func (d *Drainer[T]) listenLoop(ctx context.Context, wakeup chan<- struct{}) {
 			// conn'ы будут созданы на следующем Acquire.
 			d.pool.Reset()
 		}
-		select {
-		case <-ctx.Done():
+		if !sleep(ctx, backoff) {
 			return
-		case <-time.After(backoff):
 		}
 		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
+		if backoff > maxListenBackoff {
+			backoff = maxListenBackoff
 		}
 		// После reconnect — сигналим wakeup, чтобы processLoop сделал
 		// catch-up (мог пропустить NOTIFY-и во время disconnect).
@@ -67,15 +92,28 @@ func (d *Drainer[T]) listenLoop(ctx context.Context, wakeup chan<- struct{}) {
 	}
 }
 
+// sleepFor waits for d or until ctx is done. Returns false if ctx ended first.
+func sleepFor(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
 // listenOnce — один цикл «подключиться, LISTEN, обрабатывать NOTIFY до conn-drop».
 // Возвращает err при потере connection.
-func (d *Drainer[T]) listenOnce(ctx context.Context, wakeup chan<- struct{}) error {
+// The bool reports whether the subscription was established (LISTEN succeeded)
+// before the returned error — reconnectLoop uses it to reset the backoff after a
+// healthy session.
+func (d *Drainer[T]) listenOnce(ctx context.Context, wakeup chan<- struct{}) (bool, error) {
 	// Hijack — берем conn из pool и забираем владение (pool больше его не recycle'ит).
 	// Это нужно потому, что LISTEN живет на одном connection и его нельзя
 	// возвращать в pool (idle-connection-reset уничтожит state LISTEN-а).
 	pconn, err := d.pool.Acquire(ctx)
 	if err != nil {
-		return fmt.Errorf("pool.Acquire: %w", err)
+		return false, fmt.Errorf("pool.Acquire: %w", err)
 	}
 	conn := pconn.Hijack()
 	defer func() {
@@ -93,7 +131,7 @@ func (d *Drainer[T]) listenOnce(ctx context.Context, wakeup chan<- struct{}) err
 	}()
 
 	if _, err := conn.Exec(ctx, "LISTEN "+d.cfg.Channel); err != nil {
-		return fmt.Errorf("LISTEN: %w", err)
+		return false, fmt.Errorf("LISTEN: %w", err)
 	}
 	d.logger.Debug("listen_connected")
 
@@ -104,13 +142,13 @@ func (d *Drainer[T]) listenOnce(ctx context.Context, wakeup chan<- struct{}) err
 		notif, err := conn.WaitForNotification(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil
+				return true, nil
 			}
 			// Wrap the leaf error to preserve the call-site (like the sibling
 			// pool.Acquire / LISTEN paths above): listenLoop logs this to trigger
 			// reconnect, and a bare pgx/network error is indistinguishable from an
 			// Acquire/Exec failure when triaging reconnect churn from logs.
-			return fmt.Errorf("WaitForNotification: %w", err)
+			return true, fmt.Errorf("WaitForNotification: %w", err)
 		}
 		if notif == nil {
 			continue
