@@ -340,10 +340,11 @@ func (d *Drainer[T]) drainBatch(ctx context.Context) {
 		}
 
 		// Обрабатываем batch внутри одной транзакции (держит row-lock).
+		retry := make([]bool, len(rows))
 		needsRetryAfter := false
-		for _, r := range rows {
-			retryThisRow := d.processRowInTx(ctx, tx, r)
-			if retryThisRow {
+		for i, r := range rows {
+			retry[i] = d.processRowInTx(ctx, tx, r)
+			if retry[i] {
 				needsRetryAfter = true
 			}
 		}
@@ -359,9 +360,13 @@ func (d *Drainer[T]) drainBatch(ctx context.Context) {
 		commitCancel()
 
 		// Если транзитные ошибки — sleep backoff чтобы не загрузить FGA
-		// серией мгновенных retry-ев. Используем attempt_count первой row.
+		// серией мгновенных retry-ев. Размер backoff — по attempt_count
+		// САМОЙ-ретраенной transient-row батча (не rows[0], который под
+		// `ORDER BY attempt_count` — наименее-ретраенная row, часто свежий
+		// успех), иначе застрявшая tail-row переклеймится с BackoffMin-каденсом
+		// именно во время partial-outage, ради которого backoff и существует.
 		if needsRetryAfter {
-			sleep := expBackoff(rows[0].attemptCount, d.cfg.BackoffMin, d.cfg.BackoffMax)
+			sleep := expBackoff(backoffAttemptCount(rows, retry), d.cfg.BackoffMin, d.cfg.BackoffMax)
 			select {
 			case <-time.After(sleep):
 			case <-ctx.Done():
@@ -497,6 +502,24 @@ func (d *Drainer[T]) poison(ctx context.Context, tx pgx.Tx, id int64, errMsg str
 	if d.onPoison != nil {
 		d.onPoison()
 	}
+}
+
+// backoffAttemptCount returns the largest attempt_count among the batch rows
+// flagged transient (retry[i]==true) — the pacing input for the post-batch retry
+// backoff. It must NOT be sized off rows[0]: claimRows orders pending rows
+// `ORDER BY attempt_count, id`, so rows[0] is the LEAST-attempted row of the
+// batch (often a fresh CREATED intent that applied successfully), and pacing a
+// mixed batch off it would re-claim a persistently-failing tail row at BackoffMin
+// cadence during a partial outage — exactly when the exponential backoff is meant
+// to cushion the target. Returns 0 when no row is transient.
+func backoffAttemptCount(rows []claimedRow, retry []bool) int {
+	attempt := 0
+	for i, r := range rows {
+		if retry[i] && r.attemptCount > attempt {
+			attempt = r.attemptCount
+		}
+	}
+	return attempt
 }
 
 // expBackoff = min(base * 2^(attempt-1), max). attempt — 1-based.
