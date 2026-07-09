@@ -39,19 +39,3 @@ type CheckClientFunc func(ctx context.Context, subjectID, relation, object strin
 func (f CheckClientFunc) Check(ctx context.Context, subjectID, relation, object string) (bool, error) {
 	return f(ctx, subjectID, relation, object)
 }
-
-// CreatorTupleWriter — port-интерфейс для sync FGA-write own-creator
-// tuple. Реализуется client'ом в kacho-vpc / kacho-compute / kacho-lb (одна
-// реализация на сервис; обычно тот же gRPC client, что и CheckClient — две
-// разные RPC на одном connection'е).
-//
-// Семантика:
-//   - subjectID — "user:usr_creator" / "service_account:sva_creator"
-//   - relation  — обычно "admin"
-//   - object    — "vpc_network:enp_new" / "compute_instance:inst_new"
-//
-// Вызывается из Create handler'а ДО `tx.Commit()`. На err — Create handler
-// должен `tx.Rollback()` и вернуть Unavailable клиенту.
-type CreatorTupleWriter interface {
-	WriteCreatorTuple(ctx context.Context, subjectID, relation, object string) error
-}
