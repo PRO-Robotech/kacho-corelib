@@ -270,16 +270,12 @@ func (i *Interceptor) authorize(ctx context.Context, fullMethod string, req any)
 		return DecisionDenied, err
 	}
 
-	// 5. Cache lookup.
-	if allowed, hit := i.opts.Cache.Get(subjectFGA, entry.Relation, objectType, objectID); hit {
+	// 5. Cache lookup. Кешируются только positive-результаты (negative никогда
+	// не кешируется — см. cache.go package-doc), поэтому hit ⇒ allowed.
+	if _, hit := i.opts.Cache.Get(subjectFGA, entry.Relation, objectType, objectID); hit {
 		atomic.AddUint64(&i.cacheHitsTotal, 1)
-		if allowed {
-			atomic.AddUint64(&i.allowedTotal, 1)
-			return DecisionAllowed, nil
-		}
-		// Negative never cached — defensive branch для future use.
-		atomic.AddUint64(&i.deniedTotal, 1)
-		return DecisionDenied, nil
+		atomic.AddUint64(&i.allowedTotal, 1)
+		return DecisionAllowed, nil
 	}
 
 	// 6. Rate-limit denied-storm: применяется ДО Check call, иначе
