@@ -242,7 +242,6 @@ func (r *Reconciler) GCOrphans(ctx context.Context) (int, error) {
 	}
 
 	emitted := 0
-	live := map[string]struct{}{}
 	candidates := make(map[string]struct{}, len(tuples))
 	for _, tup := range tuples {
 		candidates[tup.ID] = struct{}{}
@@ -254,7 +253,6 @@ func (r *Reconciler) GCOrphans(ctx context.Context) (int, error) {
 			return emitted, fmt.Errorf("reconciler.GCOrphans exists %s: %w", tup.ID, err)
 		}
 		if exists {
-			live[tup.ID] = struct{}{}
 			r.clearTombstone(tup.ID)
 			continue
 		}
