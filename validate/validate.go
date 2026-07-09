@@ -13,7 +13,7 @@
 //     дефисом; одна буква — валидна). Пустое имя — отдельная проверка
 //     `name is required`.
 //   - Description: до 256 символов.
-//   - Labels: до 64 пар; ключ `^[a-z][-_./\\a-z0-9]{0,62}$` (1..63 байта);
+//   - Labels: до 64 пар; ключ `^[a-z][-_./\\@a-z0-9]{0,62}$` (1..63 байта);
 //     значение 0..63 байта.
 //   - UpdateMask: каждое поле должно быть известно сервисом; неизвестное —
 //     `InvalidArgument`.
@@ -165,7 +165,7 @@ func Labels(field string, labels map[string]string) error {
 	for k, v := range labels {
 		if len(k) == 0 || len(k) > MaxLabelKeyLen || !labelKeyRe.MatchString(k) {
 			return coreerrors.InvalidArgument().
-				AddFieldViolation(field+"."+k, "invalid label key (1..63 chars, lowercase letters, digits, _-./\\)").
+				AddFieldViolation(field+"."+k, "invalid label key (1..63 chars, lowercase letters, digits, _-./\\@)").
 				Err()
 		}
 		if len(v) > MaxLabelValueLen {
