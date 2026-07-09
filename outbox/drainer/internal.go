@@ -368,10 +368,10 @@ func (d *Drainer[T]) drainBatch(ctx context.Context) {
 				return
 			}
 		} else if iter > 0 {
-			// Tiny inter-batch jitter (0-5ms) дает другой реплике шанс
+			// Tiny inter-batch jitter (0-10ms) дает другой реплике шанс
 			// claim'нуть следующий batch. Применяется только после первой
 			// итерации чтобы не задерживать первую обработку single-drainer.
-			yieldJitter := time.Duration(rand.IntN(5)) * time.Millisecond
+			yieldJitter := interBatchJitter()
 			if yieldJitter > 0 {
 				select {
 				case <-time.After(yieldJitter):
@@ -382,6 +382,13 @@ func (d *Drainer[T]) drainBatch(ctx context.Context) {
 		}
 		iter++
 	}
+}
+
+// interBatchJitter returns a random inter-batch yield window in [0,10ms],
+// matching drainBatch step-3 godoc. Applied between claim iterations to give
+// another HA replica a chance to claim the next batch before this drainer loops.
+func interBatchJitter() time.Duration {
+	return time.Duration(rand.IntN(11)) * time.Millisecond
 }
 
 // haFairnessLimit returns max(1, min(4, batchSize)) — upper bound для random
