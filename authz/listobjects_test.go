@@ -269,6 +269,58 @@ func TestListObjects_Pagination(t *testing.T) {
 	}
 }
 
+// TestListObjects_PerPageDeadline — FollowupTimeout bounds ONE ListObjects RPC
+// call (field doc), so it MUST be applied per page, not once across the whole
+// pagination loop. A healthy but multi-page peer whose per-page work fits the
+// budget must NOT be spuriously cut off. With a single shared deadline the 2nd
+// page inherits a shrunken remaining budget and fails closed to ErrUnavailable
+// even though the peer is fine.
+//
+// Deterministic: each page-call races its own per-page work against ctx.Done.
+// Under a shared budget the 2nd call sees ctx already near-expired → ctx.Done
+// wins → DeadlineExceeded. Under a per-call deadline each call gets the full
+// budget → work wins → success.
+func TestListObjects_PerPageDeadline(t *testing.T) {
+	const followup = 300 * time.Millisecond
+	const perPageWork = 200 * time.Millisecond // < followup, so each page fits its own budget
+
+	page := 0
+	client := &fakeClient{
+		fn: func(ctx context.Context, req ListObjectsRequest) (ListObjectsResponse, error) {
+			select {
+			case <-time.After(perPageWork):
+			case <-ctx.Done():
+				return ListObjectsResponse{}, status.Error(codes.DeadlineExceeded, "ctx deadline exceeded mid-pagination")
+			}
+			switch page {
+			case 0:
+				page++
+				return ListObjectsResponse{ResourceIDs: []string{"a", "b"}, NextPageToken: "tok-2"}, nil
+			case 1:
+				page++
+				return ListObjectsResponse{ResourceIDs: []string{"c", "d"}, NextPageToken: ""}, nil
+			}
+			return ListObjectsResponse{}, errors.New("unexpected page call")
+		},
+	}
+	svc := NewListObjectsService(client, ListObjectsConfig{
+		TTL:             time.Second,
+		MaxEntries:      100,
+		MaxResults:      10000,
+		FollowupTimeout: followup,
+		AuthzModelID:    "m_test_v1",
+		ServiceName:     "kacho-test",
+	})
+
+	ids, err := svc.ListAllowedIDs(context.Background(), "user:usr_alice", "vpc_network", "vpc.networks.read", ListAllowedIDsOptions{})
+	if err != nil {
+		t.Fatalf("multi-page list of a healthy peer failed closed: %v", err)
+	}
+	if len(ids) != 4 {
+		t.Fatalf("ids = %v, want 4 items across 2 pages", ids)
+	}
+}
+
 // Scope hint produces different cache entries.
 func TestListObjects_ScopeHintSeparateCache(t *testing.T) {
 	client := &fakeClient{
