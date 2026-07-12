@@ -138,6 +138,9 @@ func TestKnownPrefixes_EveryConstantIsMember(t *testing.T) {
 		"PrefixTargetGroup":      PrefixTargetGroup,
 		"PrefixApplication":      PrefixApplication,
 		"PrefixRegistry":         PrefixRegistry,
+		"PrefixVolume":           PrefixVolume,
+		"PrefixStorageSnapshot":  PrefixStorageSnapshot,
+		"PrefixOperationStorage": PrefixOperationStorage,
 		"PrefixOperationReg":     PrefixOperationReg,
 		"PrefixOperationRM":      PrefixOperationRM,
 		"PrefixOperationVPC":     PrefixOperationVPC,
@@ -154,6 +157,44 @@ func TestKnownPrefixes_EveryConstantIsMember(t *testing.T) {
 	// reg/rop — регресс-гуард на конкретный найденный drift.
 	require.True(t, HasKnownPrefix(NewID(PrefixRegistry)), "reg-id must be known")
 	require.True(t, HasKnownPrefix(NewID(PrefixOperationReg)), "rop-id must be known")
+}
+
+// TestStoragePrefixes_DistinctAndKnown — storage-домен (kacho-storage) получает
+// собственные prefix'ы: Volume (`vol`, block-volume, НЕ epd-Disk),
+// StorageSnapshot (`snp`, отдельно от compute PrefixSnapshot `fd8`) и op-root
+// `sop` (декаплен от ресурса, как enp/aop). Проверяем: NewID валиден через
+// IsValid, HasKnownPrefix знает их, и они не совпадают ни с одним существующим
+// resource/op-prefix'ом (в т.ч. compute epd/fd8).
+func TestStoragePrefixes_DistinctAndKnown(t *testing.T) {
+	require.Equal(t, "vol", PrefixVolume)
+	require.Equal(t, "snp", PrefixStorageSnapshot)
+	require.Equal(t, "sop", PrefixOperationStorage)
+
+	// Storage-prefix'ы отличны от compute (Disk `epd`, Snapshot `fd8`) — это
+	// отдельный домен, не переиспользование compute-констант.
+	require.NotEqual(t, PrefixDisk, PrefixVolume, "vol must differ from compute Disk epd")
+	require.NotEqual(t, PrefixSnapshot, PrefixStorageSnapshot, "snp must differ from compute Snapshot fd8")
+
+	// Попарная уникальность storage-prefix'ов + отсутствие коллизий со всеми
+	// уже известными префиксами проекта.
+	known := KnownPrefixes()
+	storage := []string{PrefixVolume, PrefixStorageSnapshot, PrefixOperationStorage}
+	seen := map[string]bool{}
+	for _, p := range storage {
+		require.Lenf(t, p, 3, "storage prefix %q must be 3 chars", p)
+		require.Falsef(t, seen[p], "duplicate storage prefix %q", p)
+		seen[p] = true
+	}
+
+	// NewID → валидная форма, HasKnownPrefix true, registered в KnownPrefixes.
+	for _, p := range storage {
+		id := NewID(p)
+		require.Lenf(t, id, 20, "prefix=%q", p)
+		require.Truef(t, IsValid(id, p), "id %q must be valid for prefix %q", id, p)
+		require.Truef(t, HasKnownPrefix(id), "id %q must pass HasKnownPrefix", id)
+		_, ok := known[p]
+		require.Truef(t, ok, "prefix %q must be registered in KnownPrefixes()", p)
+	}
 }
 
 // TestKnownPrefixes_ReturnsCopy — KnownPrefixes() отдаёт копию: мутация

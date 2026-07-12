@@ -70,6 +70,14 @@ const (
 	PrefixImage    = "fd8"
 	PrefixSnapshot = "fd8"
 
+	// storage (kacho-storage): собственный storage-домен, отдельный от compute.
+	// Volume — block-volume нового домена (`vol`); это НЕ epd-Disk, а отдельный
+	// ресурс со своим prefix'ом. StorageSnapshot — snapshot storage-домена
+	// (`snp`), отдельно от compute PrefixSnapshot (`fd8`). DiskType — человеко-
+	// читаемый slug (НЕ NewID-prefix), поэтому своей константы не требует.
+	PrefixVolume          = "vol"
+	PrefixStorageSnapshot = "snp"
+
 	// nlb: LoadBalancer/Listener/TargetGroup получают каждый свой 3-char
 	// префикс — opsproxy в api-gateway маршрутизирует по PrefixOperationNLB
 	// (== PrefixLoadBalancer), но resource-prefix у Listener/TargetGroup
@@ -105,6 +113,7 @@ const (
 	PrefixOperationCompute = PrefixInstance     // compute: epd
 	PrefixOperationNLB     = PrefixLoadBalancer // nlb: nlb
 	PrefixOperationApps    = "aop"              // apps op-root (декаплен от PrefixApplication)
+	PrefixOperationStorage = "sop"              // storage op-root (декаплен от PrefixVolume; opsproxy sop→storage)
 )
 
 // NewID возвращает идентификатор формата "<prefix><17-char crockford-base32>"
@@ -210,9 +219,10 @@ func allKnownPrefixValues() []string {
 		PrefixCloud, PrefixOrganization, PrefixNetwork, PrefixSubnet, PrefixAddress,
 		PrefixRouteTable, PrefixSecurityGroup, PrefixGateway, PrefixNetworkInterface,
 		PrefixAddressPool, PrefixAnycastPool, PrefixInstance, PrefixImage,
+		PrefixVolume, PrefixStorageSnapshot,
 		PrefixLoadBalancer, PrefixListener, PrefixTargetGroup,
 		PrefixApplication, PrefixRegistry,
-		PrefixOperationVPC, PrefixOperationApps, PrefixOperationReg,
+		PrefixOperationVPC, PrefixOperationApps, PrefixOperationReg, PrefixOperationStorage,
 	}
 	return append(vals, domainStringPrefixes...)
 }
